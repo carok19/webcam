@@ -1,0 +1,22 @@
+LICENCIAS DE TERCEROS
+=====================
+
+FFmpeg 6.1 (carpeta ffmpeg/)
+  Compilación "Sdcb.FFmpeg.runtime.windows-x64" 6.1.0 (licencia GPL-3.0).
+  Código fuente: https://ffmpeg.org  —  https://github.com/sdcb/FFmpeg.AutoGen
+  Puedes reemplazar las 3 DLL por una compilación LGPL equivalente (por ejemplo
+  "ffmpeg-n6.1-latest-win64-lgpl-shared-6.1" de https://github.com/BtbN/FFmpeg-Builds):
+  avcodec-60.dll, avutil-58.dll y swresample-4.dll. El receptor funciona igual.
+  Si vas a REDISTRIBUIR este programa (no sólo usarlo tú), usa la compilación LGPL.
+
+FFmpeg.AutoGen 6.1 — LGPL-3.0 — https://github.com/Ruslan-B/FFmpeg.AutoGen
+
+NDI®
+  NDI® es una marca registrada de Vizrt NDI AB. https://ndi.video
+  Este programa NO incluye la librería NDI: usa el "NDI Runtime" que el usuario instala
+  (NDI Tools o DistroAV). Si quieres incluirla junto al .exe, copia
+  Processing.NDI.Lib.x64.dll desde el NDI SDK (gratuito, https://ndi.video/for-developers/ndi-sdk/)
+  y respeta su licencia: debes mostrar el aviso de marca "NDI®" y el enlace https://ndi.video,
+  e incluir el archivo de licencia del SDK (NDI SDK License Agreement).
+
+.NET 8 (incluido en el .exe) — MIT — https://dotnet.microsoft.com

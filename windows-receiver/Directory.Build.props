@@ -9,5 +9,6 @@
     <Product>Receptor Cámara NDI</Product>
     <EnableWindowsTargeting>true</EnableWindowsTargeting>
     <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+    <DebugType>embedded</DebugType>
   </PropertyGroup>
 </Project>

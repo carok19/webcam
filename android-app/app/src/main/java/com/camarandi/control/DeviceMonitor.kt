@@ -24,6 +24,8 @@ class DeviceMonitor(private val context: Context) {
         val charging: Boolean,
         val wifiMhz: Int,
         val wifiRssi: Int,
+        /** CPU usada por esta app (no incluye el proceso de cámara ni el codificador por hardware). */
+        val appCpuPct: Double,
     ) {
         val levelName get() = when (level) { 2 -> "hot"; 1 -> "warm"; else -> "ok" }
         val wifiBand get() = when {
@@ -38,6 +40,10 @@ class DeviceMonitor(private val context: Context) {
     private val wifi = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
     private var lastHeadroomMs = 0L
     private var lastHeadroom = Float.NaN
+    private var lastCpuMs = android.os.Process.getElapsedCpuTime()
+    private var lastWallMs = android.os.SystemClock.elapsedRealtime()
+    private var cpuPct = 0.0
+    private val cores = Runtime.getRuntime().availableProcessors().coerceAtLeast(1)
 
     fun read(): Status {
         val bat = context.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
@@ -61,8 +67,15 @@ class DeviceMonitor(private val context: Context) {
             else -> 0
         }
 
+        val cpuNow = android.os.Process.getElapsedCpuTime()
+        if (now - lastWallMs >= 900) {
+            cpuPct = 100.0 * (cpuNow - lastCpuMs) / ((now - lastWallMs) * cores)
+            lastCpuMs = cpuNow
+            lastWallMs = now
+        }
+
         @Suppress("DEPRECATION")
         val info = runCatching { wifi.connectionInfo }.getOrNull()
-        return Status(level, thermal, head, temp, pct, plugged, info?.frequency ?: 0, info?.rssi ?: 0)
+        return Status(level, thermal, head, temp, pct, plugged, info?.frequency ?: 0, info?.rssi ?: 0, cpuPct)
     }
 }

@@ -601,6 +601,7 @@ class StreamEngine(private val context: Context) :
             put("batteryPct", s.batteryPct)
             put("batteryTempC", s.batteryTempC.toDouble())
             put("charging", s.charging)
+            put("cpuPct", s.appCpuPct)
             put("encodeMs", enc?.avgEncodeMs ?: 0.0)
             put("rttMs", transport.rttMs)
             put("appVersion", APP_VERSION)

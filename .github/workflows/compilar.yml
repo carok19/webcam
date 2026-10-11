@@ -1,0 +1,58 @@
+name: Compilar APK y receptor
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  android:
+    name: App Android (APK)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Compilar APK
+        working-directory: android-app
+        run: |
+          chmod +x gradlew
+          ./gradlew --no-daemon assembleRelease
+          cp app/build/outputs/apk/release/app-release.apk CamaraNDI.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CamaraNDI-apk
+          path: android-app/CamaraNDI.apk
+
+  windows:
+    name: Receptor Windows (.exe)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+      - name: Pruebas (las de punta a punta se omiten si no hay FFmpeg en el sistema)
+        run: dotnet test windows-receiver/tests/CamaraNdi.Tests -c Release
+      - name: Publicar carpeta portable
+        run: dotnet publish windows-receiver/src/ReceptorNdi -c Release -r win-x64 -o windows-receiver/publish/ReceptorCamaraNDI
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ReceptorCamaraNDI-win-x64
+          path: windows-receiver/publish/ReceptorCamaraNDI
+
+  pruebas-linux:
+    name: Pruebas de punta a punta (Linux + FFmpeg)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+      - name: Instalar FFmpeg 6.1
+        run: sudo apt-get update && sudo apt-get install -y libavcodec60 libavutil58
+      - name: Pruebas
+        run: dotnet test windows-receiver/tests/CamaraNdi.Tests -c Release --logger "console;verbosity=normal"

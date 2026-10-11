@@ -231,6 +231,7 @@ public sealed class HelloMessage
     public double BatteryTempC { get; set; }
     public bool Charging { get; set; }
     public double EncodeMs { get; set; }
+    public double CpuPct { get; set; }
     public double RttMs { get; set; }
     public string AppVersion { get; set; } = "";
     public string? Lens { get; set; }

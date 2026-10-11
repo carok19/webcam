@@ -40,6 +40,7 @@
                 <CheckBox x:Name="StartWithWindows" Content="Iniciar con Windows" Click="OnOptionChanged"/>
                 <CheckBox x:Name="MinimizeToTray" Content="Minimizar a la bandeja" Click="OnOptionChanged"/>
                 <Button Content="Abrir registros" Click="OnOpenLogs"/>
+                <Button Content="Reloj para medir latencia" Click="OnLatencyClock"/>
             </WrapPanel>
         </Border>
 
@@ -74,7 +75,7 @@
                                             <ColumnDefinition Width="*"/>
                                         </Grid.ColumnDefinitions>
                                         <Grid.RowDefinitions>
-                                            <RowDefinition/><RowDefinition/><RowDefinition/><RowDefinition/><RowDefinition/><RowDefinition/>
+                                            <RowDefinition/><RowDefinition/><RowDefinition/><RowDefinition/><RowDefinition/><RowDefinition/><RowDefinition/>
                                         </Grid.RowDefinitions>
                                         <TextBlock Grid.Row="0" Text="Video" Foreground="{StaticResource FgDim}"/>
                                         <TextBlock Grid.Row="0" Grid.Column="1" Text="{Binding Video}"/>
@@ -88,6 +89,8 @@
                                         <TextBlock Grid.Row="4" Grid.Column="1" Text="{Binding Decoder}"/>
                                         <TextBlock Grid.Row="5" Text="NDI" Foreground="{StaticResource FgDim}"/>
                                         <TextBlock Grid.Row="5" Grid.Column="1" Text="{Binding Ndi}"/>
+                                        <TextBlock Grid.Row="6" Text="Prueba" Foreground="{StaticResource FgDim}"/>
+                                        <TextBlock Grid.Row="6" Grid.Column="1" Text="{Binding Test}" TextWrapping="Wrap"/>
                                     </Grid>
                                     <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
                                         <Button Content="Renombrar" Click="OnRename" Tag="{Binding}"/>

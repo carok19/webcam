@@ -42,7 +42,12 @@ public sealed record SessionSnapshot(
     bool Charging,
     string LatencyMode,
     int JitterBufferMs,
-    string Endpoint);
+    string Endpoint,
+    double CpuPct,
+    double LiveSeconds,
+    double AvgFpsLive,
+    double MinFpsLive,
+    double MaxTempC);
 
 /// <summary>
 /// Un celular conectado: jitter buffer + decodificador + fuente NDI, en su propio hilo.
@@ -98,6 +103,13 @@ public sealed class PhoneSession : IDisposable
     private readonly double[] _offsetWindow = new double[90];
     private int _offsetCount;
     private int _offsetIdx;
+
+    // Resumen para la tabla de pruebas (desde que empezó a estar en vivo)
+    private long _liveSinceMs = -1;
+    private long _liveFrames;
+    private long _notLiveSinceMs = -1;
+    private double _minFpsLive = double.MaxValue;
+    private double _maxTempC;
 
     // Miniatura
     private byte[]? _thumb;
@@ -516,6 +528,24 @@ public sealed class PhoneSession : IDisposable
             : now - lastPacket > 3000 ? SessionState.SinSenal
             : _outputFps > 0 ? SessionState.EnVivo : SessionState.Conectando;
 
+        // Resumen de la prueba: se reinicia si deja de estar en vivo más de 5 s.
+        if (state == SessionState.EnVivo)
+        {
+            _notLiveSinceMs = -1;
+            if (_liveSinceMs < 0) { _liveSinceMs = now; _liveFrames = 0; _minFpsLive = double.MaxValue; _maxTempC = 0; }
+            else
+            {
+                _liveFrames += d.Output;
+                if (now - _liveSinceMs > 5000) _minFpsLive = Math.Min(_minFpsLive, _outputFps);
+            }
+            _maxTempC = Math.Max(_maxTempC, hello.BatteryTempC);
+        }
+        else
+        {
+            if (_notLiveSinceMs < 0) _notLiveSinceMs = now;
+            else if (now - _notLiveSinceMs > 5000) _liveSinceMs = -1;
+        }
+
         var snap = BuildSnapshot(state, hello, jitterBuf);
         lock (_gate) _snapshot = snap;
     }
@@ -533,7 +563,12 @@ public sealed class PhoneSession : IDisposable
             state == SessionState.EnVivo ? total : 0, h.RttMs,
             _assembler.FramesDropped + _lateSkipped,
             _decoder?.Backend ?? "-", _ndiConnections, h.ThermalLevel, h.BatteryPct, h.BatteryTempC, h.Charging,
-            h.LatencyMode, jitterBuf, Endpoint?.ToString() ?? "");
+            h.LatencyMode, jitterBuf, Endpoint?.ToString() ?? "",
+            h.CpuPct,
+            _liveSinceMs >= 0 ? (Clock.NowMs - _liveSinceMs) / 1000.0 : 0,
+            _liveSinceMs >= 0 && Clock.NowMs - _liveSinceMs > 1000 ? _liveFrames * 1000.0 / (Clock.NowMs - _liveSinceMs) : 0,
+            _minFpsLive == double.MaxValue ? 0 : _minFpsLive,
+            _maxTempC);
     }
 
     public void Dispose()

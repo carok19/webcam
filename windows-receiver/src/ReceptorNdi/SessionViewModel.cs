@@ -39,6 +39,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     public string Latency { get; private set; } = "";
     public string Decoder { get; private set; } = "";
     public string Ndi { get; private set; } = "";
+    public string Test { get; private set; } = "";
     public ImageSource? Thumbnail => _bmp;
 
     public void Update()
@@ -67,6 +68,10 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             : "-";
         Decoder = x.Decoder;
         Ndi = $"{x.NdiConnections} conexión(es)  ·  modo {x.LatencyMode}";
+        var t = TimeSpan.FromSeconds(x.LiveSeconds);
+        Test = x.LiveSeconds > 0
+            ? $"{(int)t.TotalMinutes:00}:{t.Seconds:00} en vivo · {x.AvgFpsLive:F1} fps prom (mín {x.MinFpsLive:F0}) · temp máx {x.MaxTempC:F0}°C · CPU app {x.CpuPct:F0}%"
+            : "-";
 
         if (Session.TryGetThumbnail(ref _thumbVersion, out var bgra, out int w, out int h) && bgra != null)
         {

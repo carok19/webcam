@@ -107,6 +107,8 @@ public partial class MainWindow : Window
         if (Log.Directory != null) Process.Start(new ProcessStartInfo("explorer.exe", Log.Directory) { UseShellExecute = true });
     }
 
+    private void OnLatencyClock(object sender, RoutedEventArgs e) => new LatencyClockWindow().Show();
+
     private static SessionViewModel? Vm(object sender) => (sender as FrameworkElement)?.Tag as SessionViewModel;
 
     private void OnRename(object sender, RoutedEventArgs e)
