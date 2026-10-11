@@ -1,0 +1,110 @@
+# Protocolo de transporte "CNDI" (versión 1)
+
+Protocolo propio, muy simple, entre la app Android (emisor) y el receptor de Windows.
+Todo va por **UDP**. Todos los enteros son **little-endian**.
+
+## Por qué UDP (y no TCP)
+
+* Con TCP, un solo paquete perdido en el WiFi bloquea **todo** lo que viene detrás
+  (head-of-line blocking) hasta que se retransmite. En WiFi eso produce tirones de
+  200–500 ms, justo lo que queremos evitar.
+* Con UDP decidimos nosotros qué hacer con una pérdida:
+  1. el receptor pide el paquete perdido (**NACK**) y el celular lo reenvía desde un
+     búfer de los últimos ~2 s (en una LAN el reenvío llega en 5–20 ms);
+  2. si aun así no llega antes del límite del *jitter buffer* (30–150 ms, ajustable),
+     el receptor **descarta** ese frame, congela el último frame bueno y pide un
+     **keyframe** inmediato. Nunca se acumula una cola.
+* Paquetes de máximo 1200 bytes: nunca hay fragmentación IP (MTU 1500), cosa que
+  en WiFi multiplica las pérdidas.
+
+## Puertos
+
+| Puerto | Uso |
+|-------:|-----|
+| 47810/udp | Medios + control (un solo socket en el receptor para todos los celulares) |
+| 47811/udp | Descubrimiento (broadcast) |
+
+## Cabecera común (8 bytes)
+
+| Offset | Tipo | Campo |
+|---:|---|---|
+| 0 | u16 | `magic` = 0x4E43 (bytes `'C','N'`) |
+| 2 | u8  | `version` = 1 |
+| 3 | u8  | `type` |
+| 4 | u32 | `sessionId` (aleatorio, uno por arranque de la app) |
+
+## Mensajes celular → receptor
+
+### 0x01 HELLO (1 vez por segundo; también es el *keep-alive*)
+Cabecera + JSON UTF-8:
+```json
+{"deviceId":"…","name":"Cel 1","model":"Infinix X6531","codec":"hevc",
+ "width":1920,"height":1080,"fps":30,"bitrateKbps":8000,"maxBitrateKbps":12000,
+ "latencyMode":"minima","streaming":true,"thermal":0,"thermalLevel":"ok",
+ "batteryPct":87,"batteryTempC":34.5,"charging":true,"encodeMs":18.2,"rttMs":4.1,
+ "appVersion":"1.0"}
+```
+
+### 0x02 PING (4 por segundo)
+Cabecera + `u32 pingId` + `u64 phoneTimeUs`. El receptor responde PONG con los mismos
+valores; el celular calcula el RTT.
+
+### 0x03 BYE
+Cabecera. El celular dejó de transmitir.
+
+### 0x04 DISCOVER (al puerto 47811, por broadcast)
+Cabecera + JSON `{"deviceId":"…","name":"Cel 1"}`.
+
+### 0x10 VIDEO
+| Offset | Tipo | Campo |
+|---:|---|---|
+| 8  | u32 | `seq` — número de paquete (consecutivo por sesión) |
+| 12 | u32 | `frameId` — número de frame codificado |
+| 16 | u16 | `fragIdx` |
+| 18 | u16 | `fragCount` |
+| 20 | u8  | `flags` — bit0 keyframe, bit1 retransmisión |
+| 21 | u8  | `codec` — 1 = H.264, 2 = H.265/HEVC |
+| 22 | u16 | reservado |
+| 24 | u64 | `ptsUs` — momento de captura (reloj del celular, µs) |
+| 32 | …   | datos (máx. 1168 bytes) |
+
+El *payload* de un frame es Annex-B (códigos de inicio `00 00 00 01`). Cada keyframe
+lleva delante sus parámetros (VPS/SPS/PPS), así el receptor puede empezar a decodificar
+en cualquier keyframe.
+
+## Mensajes receptor → celular (al mismo puerto de origen del celular)
+
+| Tipo | Nombre | Contenido |
+|---:|---|---|
+| 0x81 | HELLO_ACK | JSON `{"receiver":"PC-SALA","ndiName":"Cel 1","jitterMs":60,"accepted":true,"reason":""}` |
+| 0x82 | PONG | `u32 pingId` + `u64 phoneTimeUs` |
+| 0x83 | NACK | `u16 count` + `count × u32 seq` |
+| 0x84 | KEYFRAME_REQ | `u32 motivo` (1 = pérdida, 2 = inicio, 3 = manual) |
+| 0x85 | REPORT | ver abajo, cada 500 ms |
+| 0x86 | DISCONNECT | JSON `{"reason":"…"}` — el usuario pulsó "Desconectar" |
+| 0x87 | DISCOVER_REPLY | JSON `{"receiver":"PC-SALA","port":47810,"version":1}` |
+
+### REPORT (0x85)
+| Offset | Tipo | Campo |
+|---:|---|---|
+| 8  | u32 | `intervalMs` |
+| 12 | u32 | `expectedPackets` |
+| 16 | u32 | `missingPackets` (huecos detectados, antes de reenviar) |
+| 20 | u32 | `lostPackets` (no recuperados a tiempo) |
+| 24 | u32 | `framesOutput` |
+| 28 | u32 | `framesDropped` |
+| 32 | u16 | `jitterMs × 10` |
+| 34 | u16 | `receiverLatencyMs × 10` (llegada del 1er paquete → entrega a NDI) |
+| 36 | u32 | `suggestedBitrateKbps` (0 = sin sugerencia) |
+| 40 | u32 | `rxBitrateKbps` |
+
+## Bitrate adaptativo (en el celular)
+
+Cada REPORT:
+* `pérdida = missing / expected`. Si > 4 % o el RTT sube > 40 ms sobre su mínimo, o el
+  receptor sugiere menos → bitrate × 0,75.
+* Si el bitrate ya está en el mínimo y sigue la congestión 2 s → baja fps (60 → 30 → 24).
+* Si sigue 4 s más → baja resolución (4K → 1440p → 1080p → 720p).
+* Con pérdida < 1 % durante 5 s → bitrate × 1,08 hasta el máximo; luego, tras 10 s
+  estables, recupera fps; tras 20 s, resolución.
+* La temperatura pone un **techo** adicional (ver `README.md`).

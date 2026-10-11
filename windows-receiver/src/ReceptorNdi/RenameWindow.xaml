@@ -1,0 +1,16 @@
+<Window x:Class="ReceptorNdi.RenameWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Renombrar fuente NDI" Width="440" SizeToContent="Height" ResizeMode="NoResize"
+        Background="{StaticResource Bg}" WindowStartupLocation="CenterOwner" ShowInTaskbar="False">
+    <StackPanel Margin="16">
+        <TextBlock Text="Nombre de la fuente NDI (así aparece en OBS):"/>
+        <TextBox x:Name="NameBox" Margin="0,8,0,0" Padding="4" FontSize="14"/>
+        <TextBlock Text="Déjalo vacío para usar el nombre que envía el celular. Al cambiarlo, en OBS hay que volver a elegir la fuente."
+                   Foreground="{StaticResource FgDim}" TextWrapping="Wrap" FontSize="11" Margin="0,6,0,0"/>
+        <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,16,0,0">
+            <Button Content="Aceptar" IsDefault="True" Click="OnOk" Background="#2D5BB8"/>
+            <Button Content="Cancelar" IsCancel="True" Margin="0"/>
+        </StackPanel>
+    </StackPanel>
+</Window>

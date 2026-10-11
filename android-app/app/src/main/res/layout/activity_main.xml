@@ -1,0 +1,273 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/root"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@android:color/black">
+
+    <!-- Vista previa 16:9 = exactamente lo que se transmite -->
+    <com.camarandi.ui.AspectFrameLayout
+        android:id="@+id/previewFrame"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:layout_gravity="center">
+
+        <SurfaceView
+            android:id="@+id/preview"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent" />
+
+        <com.camarandi.ui.GridOverlayView
+            android:id="@+id/grid"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent" />
+    </com.camarandi.ui.AspectFrameLayout>
+
+    <!-- Capa táctil: toque para enfocar, pellizco para zoom -->
+    <View
+        android:id="@+id/touchLayer"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent" />
+
+    <!-- Punto rojo mínimo que queda visible al ocultar los controles (en la esquina, fuera del encuadre) -->
+    <View
+        android:id="@+id/liveCorner"
+        android:layout_width="10dp"
+        android:layout_height="10dp"
+        android:layout_gravity="top|end"
+        android:layout_margin="10dp"
+        android:background="@drawable/dot"
+        android:backgroundTint="@color/live"
+        android:visibility="gone" />
+
+    <!-- Controles (se ocultan solos a los 4 s) -->
+    <FrameLayout
+        android:id="@+id/controls"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent">
+
+        <!-- Barra superior -->
+        <LinearLayout
+            android:id="@+id/topBar"
+            android:layout_width="wrap_content"
+            android:layout_height="28dp"
+            android:layout_gravity="top|center_horizontal"
+            android:layout_marginTop="6dp"
+            android:background="@drawable/bg_pill"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:paddingStart="10dp"
+            android:paddingEnd="12dp">
+
+            <View
+                android:id="@+id/liveDot"
+                android:layout_width="8dp"
+                android:layout_height="8dp"
+                android:background="@drawable/dot" />
+
+            <TextView android:id="@+id/tvLive" style="@style/Pill" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="En espera" android:layout_marginStart="6dp" />
+            <TextView android:id="@+id/tvRes" style="@style/Pill" android:layout_width="wrap_content" android:layout_height="wrap_content" />
+            <TextView android:id="@+id/tvBitrate" style="@style/Pill" android:layout_width="wrap_content" android:layout_height="wrap_content" />
+            <TextView android:id="@+id/tvLatency" style="@style/Pill" android:layout_width="wrap_content" android:layout_height="wrap_content" />
+            <View
+                android:id="@+id/thermalDot"
+                android:layout_width="8dp"
+                android:layout_height="8dp"
+                android:layout_marginStart="10dp"
+                android:background="@drawable/dot" />
+            <TextView android:id="@+id/tvTemp" style="@style/Pill" android:layout_width="wrap_content" android:layout_height="wrap_content" android:layout_marginStart="4dp" />
+            <TextView android:id="@+id/tvBattery" style="@style/Pill" android:layout_width="wrap_content" android:layout_height="wrap_content" />
+        </LinearLayout>
+
+        <!-- Avisos -->
+        <TextView
+            android:id="@+id/banner"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="top|center_horizontal"
+            android:layout_marginTop="40dp"
+            android:background="@drawable/bg_pill"
+            android:maxWidth="420dp"
+            android:paddingStart="12dp"
+            android:paddingTop="4dp"
+            android:paddingEnd="12dp"
+            android:paddingBottom="4dp"
+            android:textColor="@color/text"
+            android:textSize="12sp"
+            android:visibility="gone" />
+
+        <!-- Esquina superior izquierda: ajustes -->
+        <ImageButton
+            android:id="@+id/btnSettings"
+            style="@style/RoundButton"
+            android:layout_gravity="top|start"
+            android:layout_margin="8dp"
+            android:contentDescription="Ajustes"
+            android:src="@drawable/ic_settings" />
+
+        <!-- Columna izquierda: zoom + linterna -->
+        <LinearLayout
+            android:id="@+id/leftCol"
+            android:layout_width="64dp"
+            android:layout_height="wrap_content"
+            android:layout_gravity="start|center_vertical"
+            android:layout_marginStart="4dp"
+            android:gravity="center_horizontal"
+            android:orientation="vertical">
+
+            <TextView
+                android:id="@+id/tvZoom"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="1.0x"
+                android:textColor="@color/text"
+                android:textSize="13sp"
+                android:fontFamily="sans-serif-medium" />
+
+            <TextView
+                android:id="@+id/tvZoomKind"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="óptico"
+                android:textColor="@color/text_dim"
+                android:textSize="9sp" />
+
+            <com.camarandi.ui.VerticalSlider
+                android:id="@+id/zoomSlider"
+                android:layout_width="48dp"
+                android:layout_height="170dp"
+                android:layout_marginTop="4dp" />
+
+            <ImageButton
+                android:id="@+id/btnTorch"
+                style="@style/RoundButton"
+                android:layout_marginTop="8dp"
+                android:contentDescription="Linterna"
+                android:src="@drawable/ic_flash" />
+        </LinearLayout>
+
+        <!-- Columna derecha: cuadrícula, transmitir, cambiar cámara -->
+        <LinearLayout
+            android:id="@+id/rightCol"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="end|center_vertical"
+            android:layout_marginEnd="8dp"
+            android:gravity="center_horizontal"
+            android:orientation="vertical">
+
+            <ImageButton
+                android:id="@+id/btnGrid"
+                style="@style/RoundButton"
+                android:contentDescription="Cuadrícula"
+                android:src="@drawable/ic_grid" />
+
+            <ImageButton
+                android:id="@+id/btnRecord"
+                android:layout_width="72dp"
+                android:layout_height="72dp"
+                android:layout_marginTop="18dp"
+                android:layout_marginBottom="18dp"
+                android:background="@drawable/bg_record_idle"
+                android:contentDescription="Transmitir" />
+
+            <ImageButton
+                android:id="@+id/btnFlip"
+                style="@style/RoundButton"
+                android:contentDescription="Cambiar cámara"
+                android:src="@drawable/ic_flip" />
+        </LinearLayout>
+
+        <!-- Abajo: lentes, bloqueos AE/AF/BB, exposición -->
+        <LinearLayout
+            android:id="@+id/bottomRow"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="bottom|center_horizontal"
+            android:layout_marginBottom="4dp"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <LinearLayout
+                android:id="@+id/lensChips"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal" />
+
+            <View android:layout_width="10dp" android:layout_height="1dp" />
+
+            <TextView android:id="@+id/btnAf" style="@style/Chip" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="AF" />
+            <TextView android:id="@+id/btnAe" style="@style/Chip" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="AE" />
+            <TextView android:id="@+id/btnAwb" style="@style/Chip" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="BB" />
+
+            <LinearLayout
+                android:id="@+id/evBox"
+                android:layout_width="wrap_content"
+                android:layout_height="48dp"
+                android:layout_marginStart="6dp"
+                android:background="@drawable/bg_chip"
+                android:gravity="center_vertical"
+                android:orientation="horizontal"
+                android:paddingStart="10dp"
+                android:paddingEnd="10dp">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="EV"
+                    android:textColor="@color/text"
+                    android:textSize="12sp" />
+
+                <SeekBar
+                    android:id="@+id/evSeek"
+                    android:layout_width="130dp"
+                    android:layout_height="48dp" />
+
+                <TextView
+                    android:id="@+id/tvEv"
+                    android:layout_width="34dp"
+                    android:layout_height="wrap_content"
+                    android:text="0"
+                    android:textColor="@color/text"
+                    android:textSize="12sp" />
+            </LinearLayout>
+        </LinearLayout>
+    </FrameLayout>
+
+    <!-- Panel de ajustes (lateral, no es otra pantalla) -->
+    <ScrollView
+        android:id="@+id/settingsPanel"
+        android:layout_width="340dp"
+        android:layout_height="match_parent"
+        android:layout_gravity="start"
+        android:background="@drawable/bg_panel"
+        android:visibility="gone">
+
+        <LinearLayout
+            android:id="@+id/settingsContent"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:padding="16dp" />
+    </ScrollView>
+
+    <!-- Modo ahorro: pantalla negra con brillo mínimo, un toque la reactiva -->
+    <FrameLayout
+        android:id="@+id/dimOverlay"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="@android:color/black"
+        android:clickable="true"
+        android:focusable="true"
+        android:visibility="gone">
+
+        <TextView
+            android:id="@+id/dimText"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center"
+            android:text="Modo ahorro · toca para reactivar"
+            android:textColor="#33FFFFFF"
+            android:textSize="12sp" />
+    </FrameLayout>
+</FrameLayout>

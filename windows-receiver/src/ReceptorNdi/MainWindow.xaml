@@ -1,0 +1,117 @@
+<Window x:Class="ReceptorNdi.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Receptor Cámara NDI" Width="1280" Height="820" MinWidth="720" MinHeight="480"
+        Background="{StaticResource Bg}" Icon="app.ico" WindowStartupLocation="CenterScreen">
+    <Grid Margin="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <!-- Encabezado -->
+        <StackPanel Grid.Row="0">
+            <TextBlock Text="Receptor Cámara NDI" FontSize="22" FontWeight="SemiBold"/>
+            <TextBlock x:Name="StatusText" Foreground="{StaticResource FgDim}" Margin="0,4,0,0" TextWrapping="Wrap"/>
+            <TextBlock x:Name="ErrorText" Foreground="#FF8A80" Margin="0,4,0,0" TextWrapping="Wrap" Visibility="Collapsed"/>
+        </StackPanel>
+
+        <!-- Opciones -->
+        <Border Grid.Row="1" Background="{StaticResource Card}" BorderBrush="{StaticResource CardBorder}" BorderThickness="1"
+                CornerRadius="8" Padding="12" Margin="0,12,0,12">
+            <WrapPanel VerticalAlignment="Center">
+                <StackPanel Orientation="Horizontal" Margin="0,0,24,0" VerticalAlignment="Center">
+                    <TextBlock Text="Buffer de red:" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                    <Slider x:Name="JitterSlider" Width="160" Minimum="30" Maximum="150" TickFrequency="10"
+                            IsSnapToTickEnabled="True" VerticalAlignment="Center" ValueChanged="OnJitterChanged"/>
+                    <TextBlock x:Name="JitterText" Width="56" Margin="8,0,0,0" VerticalAlignment="Center"/>
+                </StackPanel>
+                <CheckBox x:Name="UsePhoneMode" Content="Usar el modo de latencia de cada celular" Click="OnOptionChanged"/>
+                <StackPanel Orientation="Horizontal" Margin="0,0,18,0" VerticalAlignment="Center">
+                    <TextBlock Text="Decodificar con:" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                    <ComboBox x:Name="DecoderCombo" Width="150" SelectionChanged="OnOptionChanged">
+                        <ComboBoxItem Content="Automático" Tag="auto"/>
+                        <ComboBoxItem Content="GPU" Tag="gpu"/>
+                        <ComboBoxItem Content="CPU" Tag="cpu"/>
+                    </ComboBox>
+                </StackPanel>
+                <CheckBox x:Name="StartWithWindows" Content="Iniciar con Windows" Click="OnOptionChanged"/>
+                <CheckBox x:Name="MinimizeToTray" Content="Minimizar a la bandeja" Click="OnOptionChanged"/>
+                <Button Content="Abrir registros" Click="OnOpenLogs"/>
+            </WrapPanel>
+        </Border>
+
+        <!-- Celulares -->
+        <Grid Grid.Row="2">
+            <ScrollViewer VerticalScrollBarVisibility="Auto">
+                <ItemsControl x:Name="Cards">
+                    <ItemsControl.ItemsPanel>
+                        <ItemsPanelTemplate><WrapPanel/></ItemsPanelTemplate>
+                    </ItemsControl.ItemsPanel>
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate>
+                            <Border Width="400" Margin="0,0,12,12" Background="{StaticResource Card}"
+                                    BorderBrush="{StaticResource CardBorder}" BorderThickness="1" CornerRadius="8" Padding="8">
+                                <StackPanel>
+                                    <Grid Height="216" Background="Black">
+                                        <Image Source="{Binding Thumbnail}" Stretch="Uniform" RenderOptions.BitmapScalingMode="LowQuality"/>
+                                        <Border HorizontalAlignment="Left" VerticalAlignment="Top" Margin="6" CornerRadius="4"
+                                                Padding="6,2" Background="{Binding StateBrush}">
+                                            <TextBlock Text="{Binding StateText}" FontSize="11" FontWeight="Bold" Foreground="White"/>
+                                        </Border>
+                                        <Border HorizontalAlignment="Right" VerticalAlignment="Top" Margin="6" CornerRadius="4"
+                                                Padding="6,2" Background="#99000000">
+                                            <TextBlock Text="{Binding Phone}" FontSize="11" Foreground="White"/>
+                                        </Border>
+                                    </Grid>
+                                    <TextBlock Text="{Binding Name}" FontSize="16" FontWeight="SemiBold" Margin="0,8,0,0" TextTrimming="CharacterEllipsis"/>
+                                    <TextBlock Text="{Binding Model}" Foreground="{StaticResource FgDim}" FontSize="11"/>
+                                    <Grid Margin="0,8,0,0">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="110"/>
+                                            <ColumnDefinition Width="*"/>
+                                        </Grid.ColumnDefinitions>
+                                        <Grid.RowDefinitions>
+                                            <RowDefinition/><RowDefinition/><RowDefinition/><RowDefinition/><RowDefinition/><RowDefinition/>
+                                        </Grid.RowDefinitions>
+                                        <TextBlock Grid.Row="0" Text="Video" Foreground="{StaticResource FgDim}"/>
+                                        <TextBlock Grid.Row="0" Grid.Column="1" Text="{Binding Video}"/>
+                                        <TextBlock Grid.Row="1" Text="Bitrate" Foreground="{StaticResource FgDim}"/>
+                                        <TextBlock Grid.Row="1" Grid.Column="1" Text="{Binding Bitrate}"/>
+                                        <TextBlock Grid.Row="2" Text="Pérdida" Foreground="{StaticResource FgDim}"/>
+                                        <TextBlock Grid.Row="2" Grid.Column="1" Text="{Binding Loss}" Foreground="{Binding LossBrush}"/>
+                                        <TextBlock Grid.Row="3" Text="Latencia" Foreground="{StaticResource FgDim}"/>
+                                        <TextBlock Grid.Row="3" Grid.Column="1" Text="{Binding Latency}"/>
+                                        <TextBlock Grid.Row="4" Text="Decodificador" Foreground="{StaticResource FgDim}"/>
+                                        <TextBlock Grid.Row="4" Grid.Column="1" Text="{Binding Decoder}"/>
+                                        <TextBlock Grid.Row="5" Text="NDI" Foreground="{StaticResource FgDim}"/>
+                                        <TextBlock Grid.Row="5" Grid.Column="1" Text="{Binding Ndi}"/>
+                                    </Grid>
+                                    <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
+                                        <Button Content="Renombrar" Click="OnRename" Tag="{Binding}"/>
+                                        <Button Content="Pedir keyframe" Click="OnKeyframe" Tag="{Binding}"/>
+                                        <Button Content="Desconectar" Click="OnDisconnect" Tag="{Binding}" Background="#5A2A2A"/>
+                                    </StackPanel>
+                                </StackPanel>
+                            </Border>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+            </ScrollViewer>
+            <StackPanel x:Name="EmptyHint" VerticalAlignment="Center" HorizontalAlignment="Center" MaxWidth="640">
+                <TextBlock Text="Esperando celulares…" FontSize="20" HorizontalAlignment="Center"/>
+                <TextBlock x:Name="EmptyHintText" Foreground="{StaticResource FgDim}" TextWrapping="Wrap" Margin="0,8,0,0"
+                           TextAlignment="Center"/>
+            </StackPanel>
+        </Grid>
+
+        <!-- Registro -->
+        <Expander Grid.Row="3" Header="Registro" Foreground="{StaticResource Fg}" Margin="0,8,0,0">
+            <TextBox x:Name="LogBox" Height="140" IsReadOnly="True" FontFamily="Consolas" FontSize="11"
+                     Background="#0D0F12" Foreground="#B0B6BE" BorderThickness="0" VerticalScrollBarVisibility="Auto"
+                     TextWrapping="NoWrap" HorizontalScrollBarVisibility="Auto"/>
+        </Expander>
+    </Grid>
+</Window>

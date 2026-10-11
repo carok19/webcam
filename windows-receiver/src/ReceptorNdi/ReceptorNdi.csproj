@@ -1,0 +1,52 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
+    <AssemblyName>ReceptorCamaraNDI</AssemblyName>
+    <RootNamespace>ReceptorNdi</RootNamespace>
+    <ApplicationIcon>app.ico</ApplicationIcon>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <PlatformTarget>x64</PlatformTarget>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <!-- Publicación: un solo .exe con el runtime de .NET incluido (no hay que instalar nada) -->
+    <SelfContained>true</SelfContained>
+    <PublishSingleFile>true</PublishSingleFile>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+    <DebugType>embedded</DebugType>
+    <ServerGarbageCollector>false</ServerGarbageCollector>
+    <ConcurrentGarbageCollection>true</ConcurrentGarbageCollection>
+    <TieredPGO>true</TieredPGO>
+    <NoWarn>$(NoWarn);WFAC010</NoWarn>
+    <SatelliteResourceLanguages>es</SatelliteResourceLanguages>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- WinForms sólo se usa para el icono de bandeja: evitar choques de nombres con WPF -->
+    <Using Remove="System.Windows.Forms" />
+    <Using Remove="System.Drawing" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Resource Include="app.ico" />
+    <ProjectReference Include="..\CamaraNdi.Core\CamaraNdi.Core.csproj" />
+    <!-- DLLs de FFmpeg 6.1 para Windows x64. Sólo se copian las 3 que hacen falta (ver target abajo). -->
+    <PackageReference Include="Sdcb.FFmpeg.runtime.windows-x64" Version="6.1.0" ExcludeAssets="all" GeneratePathProperty="true" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <FfmpegDll Include="$(PkgSdcb_FFmpeg_runtime_windows-x64)\runtimes\win-x64\native\avcodec-60.dll" />
+    <FfmpegDll Include="$(PkgSdcb_FFmpeg_runtime_windows-x64)\runtimes\win-x64\native\avutil-58.dll" />
+    <FfmpegDll Include="$(PkgSdcb_FFmpeg_runtime_windows-x64)\runtimes\win-x64\native\swresample-4.dll" />
+    <None Include="..\..\dist-extra\**\*" LinkBase="." CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" ExcludeFromSingleFile="true" />
+  </ItemGroup>
+
+  <Target Name="CopyFfmpegBuild" AfterTargets="Build">
+    <Copy SourceFiles="@(FfmpegDll)" DestinationFolder="$(OutDir)ffmpeg" SkipUnchangedFiles="true" />
+  </Target>
+  <Target Name="CopyFfmpegPublish" AfterTargets="Publish">
+    <Copy SourceFiles="@(FfmpegDll)" DestinationFolder="$(PublishDir)ffmpeg" SkipUnchangedFiles="true" />
+  </Target>
+</Project>
