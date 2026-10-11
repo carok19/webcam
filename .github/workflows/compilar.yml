@@ -2,6 +2,8 @@ name: Compilar APK y receptor
 
 on:
   push:
+    branches: ["**"]
+    tags: ["v*"]
   pull_request:
   workflow_dispatch:
 
@@ -37,12 +39,21 @@ jobs:
           dotnet-version: "8.0.x"
       - name: Pruebas (las de punta a punta se omiten si no hay FFmpeg en el sistema)
         run: dotnet test windows-receiver/tests/CamaraNdi.Tests -c Release
-      - name: Publicar carpeta portable
-        run: dotnet publish windows-receiver/src/ReceptorNdi -c Release -r win-x64 -o windows-receiver/publish/ReceptorCamaraNDI
+      - name: Publicar versión completa (incluye .NET)
+        run: dotnet publish windows-receiver/src/ReceptorNdi -c Release -r win-x64 -o out/completo/ReceptorCamaraNDI
+      - name: Publicar versión ligera (requiere .NET 8 Desktop Runtime)
+        run: dotnet publish windows-receiver/src/ReceptorNdi -c Release -r win-x64 --self-contained false -p:EnableCompressionInSingleFile=false -o out/ligero/ReceptorCamaraNDI
+      - name: Comprimir
+        shell: pwsh
+        run: |
+          Compress-Archive -Path out/completo/ReceptorCamaraNDI -DestinationPath ReceptorCamaraNDI-win-x64.zip
+          Compress-Archive -Path out/ligero/ReceptorCamaraNDI -DestinationPath ReceptorCamaraNDI-win-x64-ligero.zip
       - uses: actions/upload-artifact@v4
         with:
           name: ReceptorCamaraNDI-win-x64
-          path: windows-receiver/publish/ReceptorCamaraNDI
+          path: |
+            ReceptorCamaraNDI-win-x64.zip
+            ReceptorCamaraNDI-win-x64-ligero.zip
 
   pruebas-linux:
     name: Pruebas de punta a punta (Linux + FFmpeg)
@@ -56,3 +67,31 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libavcodec60 libavutil58
       - name: Pruebas
         run: dotnet test windows-receiver/tests/CamaraNdi.Tests -c Release --logger "console;verbosity=normal"
+
+  release:
+    name: Publicar Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [android, windows, pruebas-linux]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artefactos
+          merge-multiple: true
+      - name: Crear Release con los archivos
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Cámara NDI ${{ github.ref_name }}
+          body: |
+            **Descargas**
+            - `CamaraNDI.apk` — app para el celular (Android 8 o superior).
+            - `ReceptorCamaraNDI-win-x64.zip` — receptor para Windows 10/11, no requiere instalar nada más que NDI Tools.
+            - `ReceptorCamaraNDI-win-x64-ligero.zip` — igual pero más pequeño; requiere el ".NET 8 Desktop Runtime x64" de Microsoft.
+
+            En el PC hace falta **NDI Tools** (https://ndi.video/tools/). Instrucciones completas en el README.
+          files: |
+            artefactos/CamaraNDI.apk
+            artefactos/ReceptorCamaraNDI-win-x64.zip
+            artefactos/ReceptorCamaraNDI-win-x64-ligero.zip
