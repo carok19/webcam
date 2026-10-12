@@ -24,6 +24,12 @@ public sealed unsafe class SimSender : IDisposable
     public string Name { get; init; } = "Simulador";
     public string DeviceId { get; init; } = "sim-" + Guid.NewGuid().ToString("N")[..8];
     public int Seed { get; init; } = 1234;
+    /// <summary>Codificar en rango completo 0–255 (como muchos celulares Android).</summary>
+    public bool FullRange { get; init; }
+    /// <summary>Si es false, el video NO dice qué rango usa (algunos celulares hacen eso).</summary>
+    public bool SignalRange { get; init; } = true;
+    /// <summary>Modo que anuncia el "celular": minima, equilibrada, calidad o maxima.</summary>
+    public string LatencyMode { get; init; } = "minima";
 
     public long FramesSent { get; private set; }
     public long PacketsSent { get; private set; }
@@ -67,6 +73,9 @@ public sealed unsafe class SimSender : IDisposable
         ctx->time_base = new AVRational { num = 1, den = Fps };
         ctx->framerate = new AVRational { num = Fps, den = 1 };
         ctx->pix_fmt = AVPixelFormat.AV_PIX_FMT_YUV420P;
+        ctx->color_range = FullRange && SignalRange ? AVColorRange.AVCOL_RANGE_JPEG
+            : SignalRange ? AVColorRange.AVCOL_RANGE_MPEG : AVColorRange.AVCOL_RANGE_UNSPECIFIED;
+        if (SignalRange) ctx->colorspace = AVColorSpace.AVCOL_SPC_BT709;
         ctx->bit_rate = BitrateKbps * 1000L;
         ctx->gop_size = Fps; // keyframe cada 1 s
         ctx->max_b_frames = 0;
@@ -131,7 +140,7 @@ public sealed unsafe class SimSender : IDisposable
         {
             DeviceId = DeviceId, Name = Name, Model = "Simulador", Codec = Codec == VideoCodec.Hevc ? "hevc" : "h264",
             Width = Width, Height = Height, Fps = Fps, BitrateKbps = BitrateKbps, MaxBitrateKbps = BitrateKbps,
-            LatencyMode = "minima", Streaming = true, BatteryPct = 100, AppVersion = "sim", RttMs = LastRttMs,
+            LatencyMode = LatencyMode, Streaming = true, BatteryPct = 100, AppVersion = "sim", RttMs = LastRttMs,
         };
         Send(Protocol.BuildJson(Protocol.Hello, _sessionId, h));
     }
@@ -218,7 +227,11 @@ public sealed unsafe class SimSender : IDisposable
         int shift = (int)(n * 8 % w);
         for (int row = 0; row < h; row++)
             for (int col = 0; col < w; col++)
-                y[row * ys + col] = (byte)(((col + shift) * 255 / w) & 0xFF);
+            {
+                int g = ((col + shift) * 255 / w) % 256;
+                // En rango limitado la imagen va de 16 (negro) a 235 (blanco).
+                y[row * ys + col] = (byte)(FullRange ? g : 16 + g * 219 / 255);
+            }
         for (int row = 0; row < h / 2; row++)
             for (int col = 0; col < w / 2; col++)
             {
@@ -227,7 +240,7 @@ public sealed unsafe class SimSender : IDisposable
             }
         int bx = (int)(n * 12 % (w - 64));
         for (int row = h / 2 - 32; row < h / 2 + 32; row++)
-            for (int col = bx; col < bx + 64; col++) y[row * ys + col] = 235;
+            for (int col = bx; col < bx + 64; col++) y[row * ys + col] = (byte)(FullRange ? 255 : 235);
     }
 
     public void Dispose() { _running = false; try { _sock?.Close(); } catch { } }

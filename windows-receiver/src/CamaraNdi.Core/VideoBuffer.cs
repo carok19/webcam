@@ -20,6 +20,10 @@ public sealed class VideoBuffer
     public long PtsUs;
     public long FirstArrivalMs;
     public long DecodedMs;
+    /// <summary>Rango de color que dice el video: 0 sin especificar, 1 limitado (MPEG), 2 completo (JPEG).</summary>
+    public int SignaledRange;
+    /// <summary>Matriz que dice el video (AVColorSpace de FFmpeg): 1 BT.709, 5/6 BT.601, 2 sin especificar.</summary>
+    public int SignaledMatrix;
 
     public static int SizeFor(int width, int height) => width * height * 3 / 2;
 }
@@ -45,7 +49,7 @@ public sealed class VideoBufferPool
         if (b == null) return;
         lock (_gate)
         {
-            if (b.Data.Length == _size && _free.Count < 6) _free.Push(b);
+            if (b.Data.Length == _size && _free.Count < 16) _free.Push(b);
         }
     }
 }

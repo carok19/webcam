@@ -42,10 +42,30 @@ class AppSettings(context: Context) {
         get() = p.getInt("maxMbps", 0)
         set(v) = p.edit().putInt("maxMbps", v).apply()
 
-    /** "minima", "equilibrada" o "calidad". */
+    /**
+     * "minima" (~40 ms de buffer), "equilibrada" (~70 ms), "calidad" (~300 ms) o "maxima" (~1 s).
+     * Por defecto "calidad": en la iglesia importa más que se vea bien que unos milisegundos.
+     */
     var latencyMode: String
-        get() = p.getString("latency", "minima") ?: "minima"
+        get() = p.getString("latency", "calidad") ?: "calidad"
         set(v) = p.edit().putString("latency", v).apply()
+
+    val isQualityMode: Boolean get() = latencyMode == "calidad" || latencyMode == "maxima"
+
+    /** "celular" (curva del fabricante) o "neutral" (curva estándar sRGB, más detalle en sombras). */
+    var toneCurve: String
+        get() = p.getString("tone", "celular") ?: "celular"
+        set(v) = p.edit().putString("tone", v).apply()
+
+    /** Medir la exposición en el centro (la persona) en vez de en toda la imagen. */
+    var meterCenter: Boolean
+        get() = p.getBoolean("meterCenter", false)
+        set(v) = p.edit().putBoolean("meterCenter", v).apply()
+
+    /** Compensación de exposición guardada (en pasos de la cámara). */
+    var evIndex: Int
+        get() = p.getInt("ev", 0)
+        set(v) = p.edit().putInt("ev", v).apply()
 
     var stabilization: Boolean
         get() = p.getBoolean("eis", false)

@@ -22,6 +22,11 @@ class AdaptiveController(
 
     var maxFpsLevel = 1
     var maxResLevel = 0
+    /**
+     * Modos de calidad: el buffer del receptor ya absorbe las pérdidas, así que sólo se baja el
+     * bitrate si de verdad se pierden frames, y nunca se bajan fps ni resolución por la red.
+     */
+    var qualityMode = false
 
     var bitrateKbps = (maxKbps * 0.7).toInt()
         private set
@@ -36,7 +41,7 @@ class AdaptiveController(
     private var congestedAtFloorMs = 0L
     private var lastIncreaseMs = 0L
 
-    val floorKbps: Int get() = maxOf(800, maxKbps / 5)
+    val floorKbps: Int get() = maxOf(800, if (qualityMode) maxKbps / 2 else maxKbps / 5)
 
     private fun ceilingKbps(): Int {
         val thermalFactor = when (thermalLevel) { 2 -> 0.5; 1 -> 0.75; else -> 1.0 }
@@ -46,7 +51,7 @@ class AdaptiveController(
 
     fun reset(newMaxKbps: Int) {
         maxKbps = newMaxKbps
-        bitrateKbps = (maxKbps * 0.7).toInt()
+        bitrateKbps = (maxKbps * if (qualityMode) 0.85 else 0.7).toInt()
         fpsLevel = 0
         resLevel = 0
         cleanMs = 0
@@ -79,21 +84,29 @@ class AdaptiveController(
         val lost = r.lost.toDouble() / r.expected
         val rttUp = minRttMs > 0 && rttMs > minRttMs + 40
         val suggestedLower = r.suggestedKbps in 1 until bitrateKbps
-        val congested = loss > 0.04 || lost > 0.01 || r.framesDropped > 0 || rttUp || suggestedLower
-        val clean = loss < 0.01 && r.framesDropped == 0L && !(minRttMs > 0 && rttMs > minRttMs + 20)
+        val congested = if (qualityMode) {
+            loss > 0.10 || lost > 0.02 || r.framesDropped > 2 || suggestedLower
+        } else {
+            loss > 0.04 || lost > 0.01 || r.framesDropped > 0 || rttUp || suggestedLower
+        }
+        val clean = if (qualityMode) {
+            loss < 0.03 && r.framesDropped == 0L
+        } else {
+            loss < 0.01 && r.framesDropped == 0L && !(minRttMs > 0 && rttMs > minRttMs + 20)
+        }
 
         if (congested) {
             cleanMs = 0
-            var target = (bitrateKbps * 0.75).toInt()
+            var target = (bitrateKbps * if (qualityMode) 0.85 else 0.75).toInt()
             if (suggestedLower) target = minOf(target, r.suggestedKbps.toInt())
             target = maxOf(floorKbps, target)
             if (target < bitrateKbps) setBitrate(target)
             if (bitrateKbps <= floorKbps) {
                 congestedAtFloorMs += interval
-                if (congestedAtFloorMs >= 2000 && fpsLevel < maxFpsLevel) {
+                if (!qualityMode && congestedAtFloorMs >= 2000 && fpsLevel < maxFpsLevel) {
                     setFps(fpsLevel + 1)
                     listener.onAdaptMessage("Red saturada: bajando fps para mantener la fluidez")
-                } else if (congestedAtFloorMs >= 6000 && resLevel < maxResLevel) {
+                } else if (!qualityMode && congestedAtFloorMs >= 6000 && resLevel < maxResLevel) {
                     resLevel++
                     congestedAtFloorMs = 2000
                     listener.applyResolutionLevel(resLevel)

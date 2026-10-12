@@ -207,6 +207,12 @@ public sealed unsafe class VideoDecoder : IDisposable
             }
             // Si llegan varios (no debería con LOW_DELAY), nos quedamos con el último.
             var buf = Copy(src, rent);
+            if (buf != null)
+            {
+                buf.SignaledRange = (int)_frame->color_range;
+                if ((AVPixelFormat)_frame->format == AVPixelFormat.AV_PIX_FMT_YUVJ420P) buf.SignaledRange = (int)AVColorRange.AVCOL_RANGE_JPEG;
+                buf.SignaledMatrix = (int)_frame->colorspace;
+            }
             ffmpeg.av_frame_unref(_frame);
             if (buf == null) return Result.Error;
             output = buf;

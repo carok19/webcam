@@ -40,10 +40,17 @@ Cabecera + JSON UTF-8:
 ```json
 {"deviceId":"…","name":"Cel 1","model":"Infinix X6531","codec":"hevc",
  "width":1920,"height":1080,"fps":30,"bitrateKbps":8000,"maxBitrateKbps":12000,
- "latencyMode":"minima","streaming":true,"thermal":0,"thermalLevel":"ok",
+ "latencyMode":"calidad","streaming":true,"thermal":0,"thermalLevel":"ok",
  "batteryPct":87,"batteryTempC":34.5,"charging":true,"encodeMs":18.2,"rttMs":4.1,
- "appVersion":"1.0"}
+ "cpuPct":12.5,"appVersion":"1.0"}
 ```
+`latencyMode`: `minima` (buffer 40 ms), `equilibrada` (70 ms), `calidad` (300 ms + 100 ms de suavizado)
+o `maxima` (800 ms + 300 ms de suavizado). El receptor usa el buffer del modo salvo que el usuario fije otro.
+
+### Color
+El video viaja tal cual lo produce el codificador del celular. El receptor lee el rango (`color_range`) y la matriz
+(`colorspace`) que trae el video; si no los trae, supone BT.709 en HD y detecta rango completo por los valores
+de luma (< 8 o > 247). Siempre entrega a NDI rango limitado BT.709.
 
 ### 0x02 PING (4 por segundo)
 Cabecera + `u32 pingId` + `u64 phoneTimeUs`. El receptor responde PONG con los mismos

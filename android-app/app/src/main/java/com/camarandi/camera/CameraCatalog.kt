@@ -98,6 +98,23 @@ class CameraInfo(val id: String, val chars: CameraCharacteristics) {
         .contains(CameraMetadata.CONTROL_VIDEO_STABILIZATION_MODE_ON)
     val maxAfRegions: Int = chars[CameraCharacteristics.CONTROL_MAX_REGIONS_AF] ?: 0
     val maxAeRegions: Int = chars[CameraCharacteristics.CONTROL_MAX_REGIONS_AE] ?: 0
+    val nrModes: IntArray = chars[CameraCharacteristics.NOISE_REDUCTION_AVAILABLE_NOISE_REDUCTION_MODES] ?: IntArray(0)
+    val edgeModes: IntArray = chars[CameraCharacteristics.EDGE_AVAILABLE_EDGE_MODES] ?: IntArray(0)
+    val tonemapModes: IntArray = chars[CameraCharacteristics.TONEMAP_AVAILABLE_TONE_MAP_MODES] ?: IntArray(0)
+    val antibandingModes: IntArray = chars[CameraCharacteristics.CONTROL_AE_AVAILABLE_ANTIBANDING_MODES] ?: IntArray(0)
+
+    /** ¿Se puede pedir una curva de tono estándar (sRGB) en vez de la del fabricante? */
+    val supportsNeutralTone: Boolean
+        get() = tonemapModes.contains(CameraMetadata.TONEMAP_MODE_PRESET_CURVE) ||
+            tonemapModes.contains(CameraMetadata.TONEMAP_MODE_GAMMA_VALUE)
+
+    /** Android 13+: el HAL puede optimizar cada salida si sabe que una es "grabación de video". */
+    val supportsVideoUseCase: Boolean = Build.VERSION.SDK_INT >= 33 &&
+        capabilities.contains(CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_STREAM_USE_CASE) &&
+        (chars[CameraCharacteristics.SCALER_AVAILABLE_STREAM_USE_CASES] ?: LongArray(0)).let { uc ->
+            uc.contains(CameraMetadata.SCALER_AVAILABLE_STREAM_USE_CASES_VIDEO_RECORD.toLong()) &&
+                uc.contains(CameraMetadata.SCALER_AVAILABLE_STREAM_USE_CASES_PREVIEW.toLong())
+        }
 
     private val streamMap = chars[CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP]
 

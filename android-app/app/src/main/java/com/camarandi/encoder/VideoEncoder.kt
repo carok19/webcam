@@ -28,6 +28,13 @@ class VideoEncoder(
         val bitrateBps: Int,
         val cbr: Boolean,
         val iFrameIntervalSec: Int = 1,
+        /** Pedir al codificador su modo de baja latencia (sólo en los modos rápidos). */
+        val lowLatency: Boolean = true,
+        /**
+         * Tope de cuantización (Android 12+). Evita que el codificador "aplaste" zonas oscuras y
+         * de poco contraste (ropa negra, alfombra) cuando la escena se complica. 0 = sin tope.
+         */
+        val qpMax: Int = 0,
     )
 
     interface Sink {
@@ -88,7 +95,8 @@ class VideoEncoder(
         if (!full) return f
         f.setInteger(MediaFormat.KEY_PRIORITY, 0) // 0 = tiempo real
         f.setInteger(MediaFormat.KEY_OPERATING_RATE, config.fps)
-        f.setInteger(MediaFormat.KEY_LATENCY, 1)
+        if (config.lowLatency) f.setInteger(MediaFormat.KEY_LATENCY, 1)
+        if (config.qpMax > 0 && Build.VERSION.SDK_INT >= 31) f.setInteger(MediaFormat.KEY_VIDEO_QP_MAX, config.qpMax)
         if (Build.VERSION.SDK_INT >= 29) {
             f.setInteger(MediaFormat.KEY_MAX_B_FRAMES, 0)
             f.setInteger(MediaFormat.KEY_PREPEND_HEADER_TO_SYNC_FRAMES, 1)
@@ -102,7 +110,7 @@ class VideoEncoder(
             f.setInteger(MediaFormat.KEY_PROFILE, MediaCodecInfo.CodecProfileLevel.AVCProfileBaseline)
         }
         // Claves de baja latencia de fabricantes (se ignoran si no existen).
-        if (config.codecName.contains("qcom", true) || config.codecName.contains("qti", true)) {
+        if (config.lowLatency && (config.codecName.contains("qcom", true) || config.codecName.contains("qti", true))) {
             f.setInteger("vendor.qti-ext-enc-low-latency.enable", 1)
         }
         return f

@@ -10,6 +10,7 @@ namespace CamaraNdi.Tests;
 /// Prueba de punta a punta en la misma máquina: emisor simulado (FFmpeg) -> UDP -> receptor
 /// (jitter buffer + NACK + decodificador). Se salta si FFmpeg no está instalado.
 /// </summary>
+[Collection("E2E")]
 public class EndToEndTests
 {
     private readonly ITestOutputHelper _out;
@@ -49,6 +50,7 @@ public class EndToEndTests
     }
 }
 
+[Collection("E2E")]
 public class MultiPhoneTests
 {
     private readonly ITestOutputHelper _out;
@@ -96,5 +98,51 @@ public class MultiPhoneTests
         var extra = new SimSender { Port = server.MediaPort, Name = "Cel 4", Seed = 4 };
         extra.Run(TimeSpan.FromSeconds(1.5));
         Assert.Equal(3, server.Sessions.Count);
+    }
+}
+
+[Collection("E2E")]
+public class QualityModeTests
+{
+    private readonly ITestOutputHelper _out;
+    public QualityModeTests(ITestOutputHelper o) => _out = o;
+
+    [Theory]
+    [InlineData("minima")]
+    [InlineData("maxima")]
+    public void BigBufferAvoidsDroppedFrames(string mode)
+    {
+        if (!VideoDecoder.EnsureFfmpeg()) { _out.WriteLine("FFmpeg no disponible: prueba omitida"); return; }
+        var settings = new ReceiverSettings { MediaPort = 0, DiscoveryPort = 0, Decoder = "cpu" };
+        using var server = new ReceiverServer(settings);
+        // 6 % de pérdida en ambos sentidos (también se pierden NACK y reenvíos): WiFi muy malo.
+        var sim = new SimSender { Port = server.MediaPort, Width = 1280, Height = 720, Fps = 30, LossRate = 0.06, LatencyMode = mode, BitrateKbps = 4000, Seed = 5 };
+        var t = new Thread(() => sim.Run(TimeSpan.FromSeconds(8)));
+        t.Start();
+        long droppedAtStart = -1;
+        SessionSnapshot? last = null;
+        var fps = new List<double>();
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        while (t.IsAlive)
+        {
+            Thread.Sleep(500);
+            var s = server.Sessions.FirstOrDefault();
+            if (s == null) continue;
+            last = s.Snapshot;
+            if (sw.Elapsed.TotalSeconds > 2.5)
+            {
+                if (droppedAtStart < 0) droppedAtStart = last.FramesDropped;
+                if (last.State == SessionState.EnVivo) fps.Add(last.OutputFps);
+            }
+        }
+        t.Join();
+        long dropped = last!.FramesDropped - droppedAtStart;
+        _out.WriteLine($"{mode}: buffer {last.JitterBufferMs} ms, frames perdidos {dropped}, fps prom {fps.Average():F1}, latencia receptor {last.ReceiverLatencyMs:F0} ms, reenvíos {sim.Retransmitted}, keyframes pedidos {sim.KeyframeRequests}");
+        if (mode == "maxima")
+        {
+            Assert.Equal(800, last.JitterBufferMs);
+            Assert.True(dropped <= 1, $"se perdieron {dropped} frames");
+            Assert.True(fps.Average() > 27, $"fps {fps.Average():F1}");
+        }
     }
 }

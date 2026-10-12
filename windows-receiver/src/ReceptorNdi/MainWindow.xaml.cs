@@ -22,6 +22,7 @@ public partial class MainWindow : Window
     {
         InitializeComponent();
         Cards.ItemsSource = _cards;
+        SessionViewModel.SaveRequested = () => _app.SaveSettings();
 
         var s = _app.Settings;
         JitterSlider.Value = s.JitterMs;

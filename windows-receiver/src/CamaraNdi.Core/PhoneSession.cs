@@ -47,7 +47,9 @@ public sealed record SessionSnapshot(
     double LiveSeconds,
     double AvgFpsLive,
     double MinFpsLive,
-    double MaxTempC);
+    double MaxTempC,
+    string ColorInfo,
+    string RangeMode);
 
 /// <summary>
 /// Un celular conectado: jitter buffer + decodificador + fuente NDI, en su propio hilo.
@@ -68,6 +70,11 @@ public sealed class PhoneSession : IDisposable
     private string? _pendingRename;
     private bool _recreateDecoder;
     private readonly List<VideoBuffer> _playout = new();
+    private readonly RangeDetector _rangeDetector = new();
+    private string _colorInfo = "-";
+
+    /// <summary>Sólo para pruebas: ve cada imagen justo antes de enviarla a NDI.</summary>
+    public Action<VideoBuffer>? FrameTap { get; set; }
 
     // Identidad / red
     public string DeviceId { get; }
@@ -177,6 +184,7 @@ public sealed class PhoneSession : IDisposable
                 _assembler.Reset();
                 _recreateDecoder = true;
                 _offsetCount = 0;
+                _rangeDetector.Reset();
             }
             if (!_settings.Names.ContainsKey(DeviceId) && DefaultName(hello) != DefaultName(_hello) && _ndi != null) rename = true;
             _hello = hello;
@@ -375,6 +383,7 @@ public sealed class PhoneSession : IDisposable
         buf.PtsUs = fr.PtsUs;
         buf.FirstArrivalMs = fr.FirstArrivalMs;
         buf.DecodedMs = Clock.NowMs;
+        FixColor(buf);
 
         // Relación reloj del celular -> reloj local (mínimo de la ventana = camino más rápido).
         _offsetWindow[_offsetIdx] = fr.CompletedMs - fr.PtsUs / 1000.0;
@@ -382,13 +391,68 @@ public sealed class PhoneSession : IDisposable
         if (_offsetCount < _offsetWindow.Length) _offsetCount++;
 
         _playout.Add(buf);
-        // Nunca dejamos crecer la cola: máximo 3 imágenes, se tiran las más viejas.
-        while (_playout.Count > 3)
+        // Nunca dejamos crecer la cola más de lo que pide el suavizado: se tiran las más viejas.
+        while (_playout.Count > MaxPlayoutFrames())
         {
             _pool.Return(_playout[0]);
             _playout.RemoveAt(0);
             _lateSkipped++;
         }
+    }
+
+    private int MaxPlayoutFrames()
+    {
+        string mode;
+        int fps;
+        lock (_gate) { mode = _hello.LatencyMode; fps = _hello.Fps > 0 ? _hello.Fps : 30; }
+        int smoothing = ReceiverSettings.SmoothingForMode(mode);
+        return Math.Clamp((int)Math.Ceiling((smoothing + 60) * fps / 1000.0) + 2, 3, 24);
+    }
+
+    /// <summary>
+    /// Deja la imagen en rango limitado BT.709, que es lo que NDI y OBS esperan.
+    /// Si el celular manda rango completo y no se convierte, los negros se aplastan.
+    /// </summary>
+    private void FixColor(VideoBuffer buf)
+    {
+        string mode;
+        lock (_gate) mode = _settings.RangeOverrides.TryGetValue(DeviceId, out var m) ? m : "auto";
+        bool signaledFull = buf.SignaledRange == 2;
+        bool full;
+        string why;
+        switch (mode)
+        {
+            case "full": full = true; why = "completo (manual)"; break;
+            case "limited": full = false; why = "limitado (manual)"; break;
+            default:
+                if (signaledFull) { full = true; why = "completo (indicado por el celular)"; }
+                else
+                {
+                    _rangeDetector.Feed(buf);
+                    full = _rangeDetector.LooksFull;
+                    why = full ? "completo (detectado)" : buf.SignaledRange == 1 ? "limitado (indicado por el celular)" : "limitado (supuesto)";
+                }
+                break;
+        }
+        bool bt601 = buf.SignaledMatrix is 5 or 6 || (buf.SignaledMatrix is 0 or 2 && buf.Height < 720);
+        ColorConverter.ToLimited709(buf, full, bt601);
+        _colorInfo = $"{(bt601 ? "BT.601→709" : "BT.709")} · rango {why}" + (full ? " → convertido a 16-235" : "");
+    }
+
+    /// <summary>Rango de color de entrada para este celular: "auto", "full" o "limited".</summary>
+    public void SetRangeOverride(string mode)
+    {
+        lock (_gate)
+        {
+            if (mode == "auto") _settings.RangeOverrides.Remove(DeviceId);
+            else _settings.RangeOverrides[DeviceId] = mode;
+        }
+        _rangeDetector.Reset();
+    }
+
+    public string RangeOverride
+    {
+        get { lock (_gate) return _settings.RangeOverrides.TryGetValue(DeviceId, out var m) ? m : "auto"; }
     }
 
     private void Output(long now)
@@ -429,6 +493,7 @@ public sealed class PhoneSession : IDisposable
         }
 
         MaybeThumbnail(buf, now);
+        FrameTap?.Invoke(buf);
 
         VideoBuffer? released = _ndi != null ? _ndi.Send(buf, fps, 1) : buf;
         _framesOutput++;
@@ -500,7 +565,13 @@ public sealed class PhoneSession : IDisposable
         uint suggested = 0;
         double frameMs = 1000.0 / Math.Max(1, hello.Fps);
         int current = hello.BitrateKbps > 0 ? hello.BitrateKbps : (int)(_rxMbps * 1000);
-        if (d.Expected > 20 && (d.Dropped > 0 || _lostPct > 2)) suggested = (uint)(current * 0.7);
+        if (ReceiverSettings.IsQualityMode(hello.LatencyMode))
+        {
+            // En calidad el buffer grande absorbe las pérdidas: sólo pedimos bajar si aun así se perdieron frames.
+            if (d.Expected > 20 && d.Dropped > 1) suggested = (uint)(current * 0.85);
+            else if (decodeAvg > frameMs * 0.9) suggested = (uint)(current * 0.85);
+        }
+        else if (d.Expected > 20 && (d.Dropped > 0 || _lostPct > 2)) suggested = (uint)(current * 0.7);
         else if (decodeAvg > frameMs * 0.8) suggested = (uint)(current * 0.8);
 
         if (ep != null && now - lastPacket < 3000)
@@ -568,7 +639,9 @@ public sealed class PhoneSession : IDisposable
             _liveSinceMs >= 0 ? (Clock.NowMs - _liveSinceMs) / 1000.0 : 0,
             _liveSinceMs >= 0 && Clock.NowMs - _liveSinceMs > 1000 ? _liveFrames * 1000.0 / (Clock.NowMs - _liveSinceMs) : 0,
             _minFpsLive == double.MaxValue ? 0 : _minFpsLive,
-            _maxTempC);
+            _maxTempC,
+            _colorInfo,
+            RangeOverride);
     }
 
     public void Dispose()

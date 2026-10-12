@@ -96,13 +96,37 @@ class SettingsPanel(
         container.addView(br, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, (40 * d).toInt()))
         hint("Es un techo: el bitrate baja solo si la red se satura o el celular se calienta, y vuelve a subir poco a poco.")
 
-        // --- Latencia
-        section("Modo de latencia")
+        // --- Latencia / calidad
+        section("Modo: rapidez o calidad")
         val lat = RadioGroup(activity)
-        lat.addView(radio("Mínima (buffer 40 ms)", s.latencyMode == "minima") { s.latencyMode = "minima"; engine.applySettings() })
-        lat.addView(radio("Equilibrada (70 ms, más suave)", s.latencyMode == "equilibrada") { s.latencyMode = "equilibrada"; engine.applySettings() })
-        lat.addView(radio("Calidad (110 ms, más bitrate)", s.latencyMode == "calidad") { s.latencyMode = "calidad"; engine.applySettings() })
+        lat.addView(radio("Máxima calidad (≈1 s de retraso)", s.latencyMode == "maxima") { s.latencyMode = "maxima"; engine.applySettings(); build() })
+        lat.addView(radio("Calidad (≈0,3 s) · recomendado", s.latencyMode == "calidad") { s.latencyMode = "calidad"; engine.applySettings(); build() })
+        lat.addView(radio("Equilibrado (≈0,1 s)", s.latencyMode == "equilibrada") { s.latencyMode = "equilibrada"; engine.applySettings(); build() })
+        lat.addView(radio("Mínima latencia (≈0,08 s)", s.latencyMode == "minima") { s.latencyMode = "minima"; engine.applySettings(); build() })
         container.addView(lat)
+        hint(
+            if (s.isQualityMode) "Calidad: más bitrate, el codificador reparte los bits donde hacen falta (sombras, ropa oscura, zoom), " +
+                "procesamiento de imagen de alta calidad y un buffer grande en el PC que recupera los paquetes perdidos " +
+                "en vez de saltar frames. Prefiere 30 fps (con poca luz, 60 fps llena las sombras de ruido)."
+            else "Baja latencia: sirve si necesitas ver la imagen casi al instante; con poca luz o mucho movimiento se ve peor."
+        )
+
+        // --- Imagen
+        section("Imagen (sin filtros)")
+        val cam = engine.catalog.mainBack
+        val neutralOk = cam?.supportsNeutralTone == true
+        val tone = RadioGroup(activity)
+        tone.addView(radio("Curva del celular (por defecto)", s.toneCurve != "neutral") { s.toneCurve = "celular"; engine.applySettings() })
+        tone.addView(radio(if (neutralOk) "Curva neutral sRGB: más detalle en negros" else "Curva neutral (este celular no la permite)", s.toneCurve == "neutral" && neutralOk, neutralOk) {
+            s.toneCurve = "neutral"; engine.applySettings()
+        })
+        container.addView(tone)
+        hint("La curva del fabricante suele dar más contraste y \"aplastar\" la ropa negra. La neutral es la estándar de las pantallas: no agrega nada, sólo no oscurece de más las sombras.")
+        val meter = RadioGroup(activity)
+        meter.addView(radio("Exposición según toda la imagen", !s.meterCenter) { s.meterCenter = false; engine.applySettings() })
+        meter.addView(radio("Exposición según el centro (la persona)", s.meterCenter) { s.meterCenter = true; engine.applySettings() })
+        container.addView(meter)
+        hint("Con ventanas o luces fuertes detrás del púlpito, medir en el centro evita que la persona y la ropa oscura queden subexpuestas. El botón EV (abajo) sube o baja la exposición y se recuerda.")
 
         // --- Nombre
         section("Nombre del dispositivo")

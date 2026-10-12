@@ -131,7 +131,16 @@ class StreamEngine(private val context: Context) :
     private var probing = false
     private var freshStart = false
 
+    // fps reales que entrega el codificador (para detectar si el procesamiento de alta calidad no da abasto)
+    private val framesEncoded = java.util.concurrent.atomic.AtomicInteger()
+    private var fpsWindowStartMs = 0L
+    private var slowTicks = 0
+    @Volatile private var hqProcessingDisabled = false
+    @Volatile var measuredFps = 0.0
+        private set
+
     init {
+        applyImagePrefs()
         refreshSupport()
         if (catalog.cameras.isEmpty()) post("No se encontró ninguna cámara utilizable", true)
     }
@@ -295,12 +304,24 @@ class StreamEngine(private val context: Context) :
     fun setAfLocked(v: Boolean) = cam.setAfLocked(v)
     fun setAeLocked(v: Boolean) = cam.update { aeLocked = v }
     fun setAwbLocked(v: Boolean) = cam.update { awbLocked = v }
-    fun setEv(index: Int) = cam.update { evIndex = index }
+    fun setEv(index: Int) {
+        settings.evIndex = index
+        cam.update { evIndex = index }
+    }
     fun setTorch(on: Boolean) = cam.update { torch = on }
+
+    /** Preferencias de imagen guardadas → controles de la cámara. */
+    private fun applyImagePrefs() = cam.update {
+        eis = settings.stabilization
+        quality = settings.isQualityMode && !hqProcessingDisabled
+        neutralTone = settings.toneCurve == "neutral"
+        meterCenter = settings.meterCenter
+        evIndex = settings.evIndex
+    }
 
     /** Se cambiaron ajustes en el panel: aplicar (reinicia el codificador si hace falta). */
     fun applySettings() = handler.post {
-        cam.update { eis = settings.stabilization }
+        applyImagePrefs()
         val c = camera ?: return@post
         refreshSupport()
         val key = encoderKey()
@@ -431,7 +452,7 @@ class StreamEngine(private val context: Context) :
     private fun refreshSupport() {
         val c = camera ?: return
         supports = Preset.ALL.map { c.evaluate(it) }
-        recommended = supports.firstOrNull { it.ok }?.preset
+        recommended = bestAuto(supports.filter { it.ok }.map { it.preset })
         if (activePreset == null) {
             activePreset = pickPreset(c)
             fps = activePreset?.fps ?: 30
@@ -448,8 +469,15 @@ class StreamEngine(private val context: Context) :
             post("${wanted.label} no está disponible en esta cámara; usando ${alt?.label ?: "ninguno"}", false)
             return alt
         }
-        return ok.firstOrNull()
+        return bestAuto(ok)
     }
+
+    /**
+     * La mejor resolución que sostiene el celular. En los modos de calidad se prefieren 30 fps:
+     * con poca luz (iglesia), 60 fps deja la mitad de luz por frame y las sombras se llenan de ruido.
+     */
+    private fun bestAuto(ok: List<Preset>): Preset? =
+        if (settings.isQualityMode) ok.firstOrNull { it.fps <= 30 } ?: ok.firstOrNull() else ok.firstOrNull()
 
     private fun autoBitrateKbps(p: Preset, hevc: Boolean): Int {
         val base = when {
@@ -487,10 +515,16 @@ class StreamEngine(private val context: Context) :
         val hw = EncoderCatalog.hardwareEncoder(mime) ?: run { post("No hay codificador por hardware", true); return }
         codecId = if (hevc) Protocol.CODEC_HEVC else Protocol.CODEC_H264
 
-        val quality = settings.latencyMode == "calidad"
+        val mode = settings.latencyMode
+        val quality = settings.isQualityMode
+        adaptive.qualityMode = quality
+        if (quality) adaptive.maxResLevel = 0 // en calidad nunca se baja la resolución por la red
         // El máximo se calcula con el preset elegido; el adaptativo ya reduce el techo por nivel de resolución.
         var maxKbps = if (settings.maxMbps > 0) settings.maxMbps * 1000 else autoBitrateKbps(chosen, hevc)
-        if (quality && settings.maxMbps == 0) maxKbps = (maxKbps * 1.25).toInt()
+        if (settings.maxMbps == 0) {
+            // En una red local el bitrate es barato: más bits = sombras y zoom sin "manchas".
+            maxKbps = (maxKbps * when (mode) { "maxima" -> 2.2; "calidad" -> 1.6; else -> 1.0 }).toInt()
+        }
         maxKbps = minOf(maxKbps, hw.maxBitrate / 1000)
         if (freshStart || adaptive.maxKbps != maxKbps) {
             freshStart = false
@@ -501,14 +535,24 @@ class StreamEngine(private val context: Context) :
         fps = fpsSteps.getOrElse(adaptive.fpsLevel) { p.fps }
         val cfg = VideoEncoder.Config(
             mime = mime, codecName = hw.name, width = p.width, height = p.height, fps = p.fps,
-            bitrateBps = startKbps * 1000, cbr = !quality && hw.supportsCbr,
+            bitrateBps = startKbps * 1000,
+            // Calidad: VBR (el codificador gasta más bits donde la imagen lo necesita) y GOP de 2 s.
+            cbr = !quality && hw.supportsCbr,
+            iFrameIntervalSec = if (quality) 2 else 1,
+            lowLatency = !quality,
+            qpMax = when (mode) {
+                "maxima" -> if (hevc) 34 else 32
+                "calidad" -> if (hevc) 38 else 36
+                else -> 0
+            },
         )
         val enc = VideoEncoder(cfg, this)
+        fpsWindowStartMs = 0L
         try {
             enc.start()
             enc.timestampRealtime = c.timestampRealtime
             encoder = enc
-            Log.i(TAG, "codificador ${hw.name} ${p.width}x${p.height}@${p.fps} ${startKbps} kbps cbr=${cfg.cbr}")
+            Log.i(TAG, "codificador ${hw.name} ${p.width}x${p.height}@${p.fps} ${startKbps} kbps cbr=${cfg.cbr} gop=${cfg.iFrameIntervalSec}s qpMax=${cfg.qpMax} modo=$mode")
         } catch (e: Exception) {
             Log.e(TAG, "no se pudo iniciar el codificador", e)
             runCatching { enc.stop() }
@@ -527,10 +571,11 @@ class StreamEngine(private val context: Context) :
 
     override fun onEncodedFrame(data: ByteArray, length: Int, ptsUs: Long, keyframe: Boolean) {
         val enc = encoder ?: return
+        framesEncoded.incrementAndGet()
         if (!transport.isConnected) return
         // Nunca mandar frames viejos (p. ej. tras una pausa): mejor saltar y pedir keyframe.
         val age = enc.ageMs(ptsUs)
-        if (!keyframe && age > 500) {
+        if (!keyframe && age > if (settings.isQualityMode) 1500 else 500) {
             enc.requestKeyframe()
             return
         }
@@ -642,10 +687,38 @@ class StreamEngine(private val context: Context) :
             override fun run() {
                 deviceStatus = monitor.read()
                 if (streaming) adaptive.onThermal(deviceStatus.level)
+                if (streaming) checkFrameRate()
                 if (streaming || previewWanted) handler.postDelayed(this, 1000) else monitorRunning = false
             }
         }
         handler.post(tick)
+    }
+
+    /**
+     * La reducción de ruido y la nitidez "de alta calidad" pueden bajar los fps en celulares lentos.
+     * Si en modo calidad la cámara no sostiene los fps pedidos durante 3 s seguidos, se vuelve al
+     * procesamiento rápido: la fluidez manda.
+     */
+    private fun checkFrameRate() {
+        val now = SystemClock.elapsedRealtime()
+        if (fpsWindowStartMs == 0L || encoder == null) {
+            fpsWindowStartMs = now
+            framesEncoded.set(0)
+            slowTicks = -3 // ignorar los primeros segundos (arranque de cámara y codificador)
+            return
+        }
+        val dt = now - fpsWindowStartMs
+        if (dt < 900) return
+        measuredFps = framesEncoded.getAndSet(0) * 1000.0 / dt
+        fpsWindowStartMs = now
+        val usingHq = settings.isQualityMode && !hqProcessingDisabled
+        if (!usingHq) { slowTicks = 0; return }
+        slowTicks = if (measuredFps < fps * 0.85) slowTicks + 1 else minOf(slowTicks, 0)
+        if (slowTicks >= 3) {
+            hqProcessingDisabled = true
+            applyImagePrefs()
+            post("Este celular no sostiene ${fps} fps con el procesamiento de alta calidad: se usa el rápido (la transmisión sigue en calidad)", false)
+        }
     }
 
     fun refreshDeviceStatus() = handler.post {

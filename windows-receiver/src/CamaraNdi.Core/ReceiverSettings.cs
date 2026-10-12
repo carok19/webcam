@@ -4,7 +4,7 @@ namespace CamaraNdi.Core;
 
 public sealed class ReceiverSettings
 {
-    /// <summary>Espera máxima por un frame incompleto (30–150 ms).</summary>
+    /// <summary>Espera máxima por un frame incompleto (30–1000 ms).</summary>
     public int JitterMs { get; set; } = 60;
     /// <summary>Si es true, cada celular elige el buffer según su "modo de latencia".</summary>
     public bool UsePhoneLatencyMode { get; set; } = true;
@@ -18,12 +18,20 @@ public sealed class ReceiverSettings
     public bool StartMinimized { get; set; }
     /// <summary>Nombre NDI personalizado por deviceId.</summary>
     public Dictionary<string, string> Names { get; set; } = new();
+    /// <summary>Rango de color de entrada por deviceId: "auto", "full" o "limited".</summary>
+    public Dictionary<string, string> RangeOverrides { get; set; } = new();
 
+    /// <summary>
+    /// Cuánto se espera a un paquete perdido antes de dar el frame por perdido.
+    /// En los modos de calidad se espera mucho más: casi nunca se pierde un frame
+    /// (y no hace falta pedir keyframes, que son los que "ensucian" la imagen).
+    /// </summary>
     public static int JitterForMode(string? mode, int fallback) => mode switch
     {
         "minima" => 40,
         "equilibrada" => 70,
-        "calidad" => 110,
+        "calidad" => 300,
+        "maxima" => 800,
         _ => fallback,
     };
 
@@ -31,9 +39,12 @@ public sealed class ReceiverSettings
     public static int SmoothingForMode(string? mode) => mode switch
     {
         "equilibrada" => 15,
-        "calidad" => 35,
+        "calidad" => 100,
+        "maxima" => 300,
         _ => 0,
     };
+
+    public static bool IsQualityMode(string? mode) => mode is "calidad" or "maxima";
 
     private static readonly JsonSerializerOptions Opts = new() { WriteIndented = true };
 

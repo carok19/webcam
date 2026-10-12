@@ -40,6 +40,23 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     public string Decoder { get; private set; } = "";
     public string Ndi { get; private set; } = "";
     public string Test { get; private set; } = "";
+    public string ColorInfo { get; private set; } = "";
+
+    /// <summary>Se llama cuando el usuario cambia algo que hay que guardar.</summary>
+    public static Action? SaveRequested;
+
+    private static readonly string[] RangeModes = { "auto", "full", "limited" };
+
+    public int RangeIndex
+    {
+        get => Math.Max(0, Array.IndexOf(RangeModes, Session.RangeOverride));
+        set
+        {
+            if (value < 0 || value >= RangeModes.Length || RangeModes[value] == Session.RangeOverride) return;
+            Session.SetRangeOverride(RangeModes[value]);
+            SaveRequested?.Invoke();
+        }
+    }
     public ImageSource? Thumbnail => _bmp;
 
     public void Update()
@@ -68,6 +85,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             : "-";
         Decoder = x.Decoder;
         Ndi = $"{x.NdiConnections} conexión(es)  ·  modo {x.LatencyMode}";
+        ColorInfo = x.ColorInfo;
         var t = TimeSpan.FromSeconds(x.LiveSeconds);
         Test = x.LiveSeconds > 0
             ? $"{(int)t.TotalMinutes:00}:{t.Seconds:00} en vivo · {x.AvgFpsLive:F1} fps prom (mín {x.MinFpsLive:F0}) · temp máx {x.MaxTempC:F0}°C · CPU app {x.CpuPct:F0}%"

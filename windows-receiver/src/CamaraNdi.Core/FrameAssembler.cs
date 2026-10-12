@@ -44,7 +44,6 @@ public sealed class FrameAssembler
     }
 
     public const int MaxPendingFrames = 240;
-    public const int MaxNacksPerSeq = 3;
     public const int MissingTrackLimit = 2048;
 
     private readonly Dictionary<uint, Slot> _frames = new();
@@ -56,8 +55,12 @@ public sealed class FrameAssembler
 
     /// <summary>Tiempo máximo que se espera a un frame incompleto.</summary>
     public int JitterMs { get; set; } = 60;
-    /// <summary>Cada cuánto se repite un NACK sin respuesta.</summary>
+    /// <summary>Intervalo mínimo entre NACK repetidos del mismo paquete.</summary>
     public int NackRetryMs { get; set; } = 20;
+
+    /// <summary>Con un buffer grande hay tiempo para pedir el mismo paquete más veces.</summary>
+    public int MaxNacks => Math.Clamp(JitterMs / 25, 3, 12);
+    public int RetryIntervalMs => Math.Max(NackRetryMs, JitterMs / (MaxNacks + 1));
 
     public bool NeedKeyframe { get; private set; } = true;
 
@@ -210,12 +213,12 @@ public sealed class FrameAssembler
         foreach (var (seq, m) in _missing)
         {
             long age = nowMs - m.DetectedMs;
-            if (age > Math.Max(JitterMs, 40) || m.NackCount >= MaxNacksPerSeq && nowMs - m.LastNackMs > NackRetryMs)
+            if (age > Math.Max(JitterMs, 40) || m.NackCount >= MaxNacks && nowMs - m.LastNackMs > RetryIntervalMs)
             {
                 (expired ??= new()).Add(seq);
                 continue;
             }
-            if (m.NackCount < MaxNacksPerSeq && (m.NackCount == 0 || nowMs - m.LastNackMs >= NackRetryMs))
+            if (m.NackCount < MaxNacks && (m.NackCount == 0 || nowMs - m.LastNackMs >= RetryIntervalMs))
             {
                 m.NackCount++;
                 m.LastNackMs = nowMs;
