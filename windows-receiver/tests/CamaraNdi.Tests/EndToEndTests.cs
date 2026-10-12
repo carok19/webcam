@@ -402,26 +402,7 @@ public class CpuDecodeSpeedTests
         Assert.True(fpsMulti > fpsOne * 1.3, $"{fpsMulti:F1} vs {fpsOne:F1}");
     }
 
-    private static List<byte[]> EncodeHevc4k(int n)
-    {
-        var dir = Path.Combine(Path.GetTempPath(), "camarandi-test");
-        Directory.CreateDirectory(dir);
-        var file = Path.Combine(dir, "t4k.hevc");
-        if (!File.Exists(file))
-        {
-            var p = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("ffmpeg",
-                $"-hide_banner -loglevel error -y -f lavfi -i testsrc2=size=3840x2160:rate=30 -frames:v {n} -c:v libx265 -preset ultrafast -x265-params log-level=error:bframes=0:aud=1 -b:v 20M -f hevc \"{file}\"")
-            { RedirectStandardError = true })!;
-            p.WaitForExit();
-        }
-        var data = File.ReadAllBytes(file);
-        // separar por AUD (NAL 35)
-        var starts = new List<int>();
-        for (int i = 0; i + 4 < data.Length; i++)
-            if (data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 0 && data[i + 3] == 1 && ((data[i + 4] >> 1) & 0x3F) == 35) starts.Add(i);
-        starts.Add(data.Length);
-        var list = new List<byte[]>();
-        for (int k = 0; k + 1 < starts.Count; k++) list.Add(data[starts[k]..starts[k + 1]]);
-        return list;
-    }
+    /// <summary>4K H.265 de prueba, codificado dentro del proceso (no hace falta el programa ffmpeg).</summary>
+    private static List<byte[]> EncodeHevc4k(int n) =>
+        new SimSender { Width = 3840, Height = 2160, Fps = 30, Codec = VideoCodec.Hevc, BitrateKbps = 20000 }.EncodeClip(n);
 }

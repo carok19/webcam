@@ -176,6 +176,60 @@ public sealed unsafe class SimSender : IDisposable
         rx.Join(500);
     }
 
+    /// <summary>
+    /// Codifica <paramref name="frames"/> imágenes de prueba (el primero es IDR, sin B-frames) y devuelve
+    /// cada frame comprimido. Sirve para medir decodificadores sin depender del programa ffmpeg.
+    /// </summary>
+    public List<byte[]> EncodeClip(int frames)
+    {
+        if (!CamaraNdi.Core.Decoding.VideoDecoder.EnsureFfmpeg()) throw new InvalidOperationException("FFmpeg no disponible");
+        var encName = Codec == VideoCodec.Hevc ? "libx265" : "libx264";
+        var enc = ffmpeg.avcodec_find_encoder_by_name(encName);
+        if (enc == null) throw new InvalidOperationException($"No hay {encName}");
+        var ctx = ffmpeg.avcodec_alloc_context3(enc);
+        ctx->width = Width;
+        ctx->height = Height;
+        ctx->time_base = new AVRational { num = 1, den = Fps };
+        ctx->framerate = new AVRational { num = Fps, den = 1 };
+        ctx->pix_fmt = AVPixelFormat.AV_PIX_FMT_YUV420P;
+        ctx->bit_rate = BitrateKbps * 1000L;
+        ctx->gop_size = 250;
+        ctx->max_b_frames = 0;
+        ffmpeg.av_opt_set(ctx->priv_data, "preset", "ultrafast", 0);
+        if (Codec == VideoCodec.Hevc) ffmpeg.av_opt_set(ctx->priv_data, "x265-params", "log-level=error:bframes=0", 0);
+        if (ffmpeg.avcodec_open2(ctx, enc, null) < 0) throw new InvalidOperationException("No se pudo abrir el codificador");
+        var frame = ffmpeg.av_frame_alloc();
+        frame->format = (int)ctx->pix_fmt;
+        frame->width = Width;
+        frame->height = Height;
+        ffmpeg.av_frame_get_buffer(frame, 32);
+        var pkt = ffmpeg.av_packet_alloc();
+        var list = new List<byte[]>();
+        for (int i = 0; i < frames; i++)
+        {
+            ffmpeg.av_frame_make_writable(frame);
+            Draw(frame, i);
+            frame->pts = i;
+            ffmpeg.avcodec_send_frame(ctx, frame);
+            DrainPackets(ctx, pkt, list);
+        }
+        ffmpeg.avcodec_send_frame(ctx, null);
+        DrainPackets(ctx, pkt, list);
+        ffmpeg.av_packet_free(&pkt);
+        ffmpeg.av_frame_free(&frame);
+        ffmpeg.avcodec_free_context(&ctx);
+        return list;
+    }
+
+    private static void DrainPackets(AVCodecContext* ctx, AVPacket* pkt, List<byte[]> list)
+    {
+        while (ffmpeg.avcodec_receive_packet(ctx, pkt) == 0)
+        {
+            list.Add(new ReadOnlySpan<byte>(pkt->data, pkt->size).ToArray());
+            ffmpeg.av_packet_unref(pkt);
+        }
+    }
+
     private static long NowUs() => (long)(Clock.NowMsPrecise * 1000);
 
     private void SendHello()
