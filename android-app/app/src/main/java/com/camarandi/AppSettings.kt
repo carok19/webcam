@@ -88,6 +88,15 @@ class AppSettings(context: Context) {
         get() = p.getString("probedFp", "") ?: ""
         set(v) = p.edit().putString("probedFp", v).apply()
 
+    /** Lo que decodifica la GPU del último PC receptor (-1 = no se sabe). Para arrancar ya con el códec correcto. */
+    var lastHevcGpuMaxHeight: Int
+        get() = p.getInt("pcHevc", -1)
+        set(v) = p.edit().putInt("pcHevc", v).apply()
+
+    var lastH264GpuMaxHeight: Int
+        get() = p.getInt("pcH264", -1)
+        set(v) = p.edit().putInt("pcH264", v).apply()
+
     var tipsShown: Boolean
         get() = p.getBoolean("tips", false)
         set(v) = p.edit().putBoolean("tips", v).apply()

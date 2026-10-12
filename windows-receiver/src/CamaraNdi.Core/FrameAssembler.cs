@@ -71,10 +71,27 @@ public sealed class FrameAssembler
     public long RecoveredPackets { get; private set; }
     public long LostPackets { get; private set; }
     public long DuplicatePackets { get; private set; }
+    /// <summary>Frames perdidos por la red (o por esperar un keyframe después de una pérdida).</summary>
     public long FramesDropped { get; private set; }
+    /// <summary>
+    /// Frames saltados porque el PC no alcanzaba a decodificar (<see cref="DropBacklog"/> y la espera
+    /// del keyframe que provoca). No es culpa de la red: no se le cuenta al celular como pérdida.
+    /// </summary>
+    public long FramesSkippedSlowPc { get; private set; }
     public long FramesAssembled { get; private set; }
     public long BytesReceived { get; private set; }
+    /// <summary>Frames distintos que empezaron a llegar (mide cuántos frames por segundo manda el celular).</summary>
+    public long FramesStarted { get; private set; }
     public int PendingFrames => _frames.Count;
+
+    /// <summary>Se está esperando un keyframe porque se saltó lo acumulado (PC lento), no por la red.</summary>
+    private bool _skippingForBacklog;
+
+    private void CountDrop()
+    {
+        if (_skippingForBacklog) FramesSkippedSlowPc++;
+        else FramesDropped++;
+    }
 
     public void Reset()
     {
@@ -82,11 +99,40 @@ public sealed class FrameAssembler
         _missing.Clear();
         _started = false;
         _seqStarted = false;
+        _skippingForBacklog = false;
         NeedKeyframe = true;
     }
 
     /// <summary>Marca el flujo como roto (p. ej. error del decodificador): descarta hasta el próximo keyframe.</summary>
     public void ForceKeyframe() => NeedKeyframe = true;
+
+    /// <summary>
+    /// Hay demasiados frames esperando (el decodificador no da abasto): se tira todo lo viejo y se
+    /// sigue desde el keyframe completo MÁS NUEVO (o se espera el próximo). Así el retraso nunca crece.
+    /// Devuelve cuántos frames se descartaron.
+    /// </summary>
+    public int DropBacklog()
+    {
+        if (!_started || _frames.Count == 0) return 0;
+        uint? newestKey = null;
+        uint newest = _nextFrameId;
+        foreach (var (id, s) in _frames)
+        {
+            if ((int)(id - newest) > 0) newest = id;
+            if (s.Keyframe && s.Complete && (newestKey == null || (int)(id - newestKey.Value) > 0)) newestKey = id;
+        }
+        uint target = newestKey ?? newest + 1;
+        int dropped = 0;
+        foreach (var id in _frames.Keys.ToList())
+        {
+            if ((int)(id - target) < 0) { _frames.Remove(id); dropped++; }
+        }
+        FramesSkippedSlowPc += (int)(target - _nextFrameId) > 0 ? (int)(target - _nextFrameId) : dropped;
+        _nextFrameId = target;
+        NeedKeyframe = true;
+        _skippingForBacklog = true;
+        return dropped;
+    }
 
     public void OnPacket(in VideoPacketHeader h, ReadOnlySpan<byte> payload, long nowMs)
     {
@@ -126,6 +172,7 @@ public sealed class FrameAssembler
                 FirstArrivalMs = nowMs,
             };
             _frames[h.FrameId] = slot;
+            FramesStarted++;
             if (_frames.Count > MaxPendingFrames) TrimPending();
         }
         if (h.FragCount != slot.FragCount || slot.Frags[h.FragIdx] != null)
@@ -147,6 +194,7 @@ public sealed class FrameAssembler
         _frames.Clear();
         _nextFrameId = frameId;
         NeedKeyframe = true;
+        _skippingForBacklog = false;
     }
 
     private void TrimPending()
@@ -266,10 +314,10 @@ public sealed class FrameAssembler
                     uint id = _nextFrameId++;
                     if (NeedKeyframe && !slot.Keyframe)
                     {
-                        FramesDropped++;
+                        CountDrop();
                         continue;
                     }
-                    if (slot.Keyframe) NeedKeyframe = false;
+                    if (slot.Keyframe) { NeedKeyframe = false; _skippingForBacklog = false; }
                     FramesAssembled++;
                     return Build(id, slot);
                 }
@@ -277,7 +325,7 @@ public sealed class FrameAssembler
                 {
                     // Inútil esperar un frame P si de todas formas necesitamos un keyframe.
                     _frames.Remove(_nextFrameId++);
-                    FramesDropped++;
+                    CountDrop();
                     continue;
                 }
             }
@@ -285,8 +333,10 @@ public sealed class FrameAssembler
             var deadline = DeadlineFor(_nextFrameId);
             if (deadline is long d && nowMs >= d)
             {
+                // Un frame que no se completó a tiempo: esto sí es la red.
                 _frames.Remove(_nextFrameId);
                 _nextFrameId++;
+                _skippingForBacklog = false;
                 FramesDropped++;
                 NeedKeyframe = true;
                 continue;
@@ -306,8 +356,8 @@ public sealed class FrameAssembler
         if (best is not uint k || k == _nextFrameId) return;
         while (_nextFrameId != k)
         {
-            if (_frames.Remove(_nextFrameId)) { }
-            FramesDropped++;
+            _frames.Remove(_nextFrameId);
+            CountDrop();
             _nextFrameId++;
         }
     }

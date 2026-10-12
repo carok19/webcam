@@ -30,6 +30,8 @@ object Protocol {
     const val REPORT: Int = 0x85
     const val DISCONNECT: Int = 0x86
     const val DISCOVER_REPLY: Int = 0x87
+    /** El PC no alcanza a decodificar: JSON {"maxHeight":1080,"reason":"…"}. */
+    const val LIMIT: Int = 0x88
 
     const val FLAG_KEYFRAME = 0x01
     const val FLAG_RETRANSMIT = 0x02

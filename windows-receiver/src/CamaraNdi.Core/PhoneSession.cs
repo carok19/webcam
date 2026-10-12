@@ -49,7 +49,9 @@ public sealed record SessionSnapshot(
     double MinFpsLive,
     double MaxTempC,
     string ColorInfo,
-    string RangeMode);
+    string RangeMode,
+    string Warning,
+    string LimitInfo);
 
 /// <summary>
 /// Un celular conectado: jitter buffer + decodificador + fuente NDI, en su propio hilo.
@@ -75,6 +77,37 @@ public sealed class PhoneSession : IDisposable
 
     /// <summary>Sólo para pruebas: ve cada imagen justo antes de enviarla a NDI.</summary>
     public Action<VideoBuffer>? FrameTap { get; set; }
+    /// <summary>Sólo para pruebas: retraso artificial por frame decodificado (simula un PC lento).</summary>
+    public int TestDecodeDelayMs { get; set; }
+
+    // Decodificación: frames enviados al decodificador que todavía no salieron (con hilos por frame
+    // salen unos frames después), para saber a qué frame pertenece cada imagen.
+    private readonly Dictionary<long, (uint FrameId, long FirstArrivalMs)> _inFlight = new();
+    private readonly List<VideoBuffer> _decoded = new();
+    /// <summary>Por códec: la altura con la que la GPU de verdad no pudo (bajo _gate).</summary>
+    private readonly Dictionary<VideoCodec, int> _gpuFailedHeight = new();
+    private long _decoderCreatedMs;
+    /// <summary>El decodificador actual va por CPU porque la GPU falló con una resolución mayor.</summary>
+    private bool _decoderForcedCpu;
+    /// <summary>El video bajó de resolución y la GPU sí puede con la nueva: cambiar en el próximo keyframe.</summary>
+    private bool _retryGpuAtKeyframe;
+    private int _lastDecodedHeight;
+    private int _hwErrorStreak;
+
+    // ¿El PC alcanza? (frames que llegan vs. frames que se decodifican)
+    private long _decodedTotal;
+    private long _backlogDrops;
+    private long _prevStarted, _prevDecoded, _prevBacklogDrops;
+    private long _lastBacklogLogMs = -60_000;
+    // Lo siguiente va bajo _gate (lo tocan el hilo de red, la interfaz y el hilo de trabajo).
+    private int _overloadTicks;
+    private long _lastLimitMs = -60_000;
+    private string _overloadWarning = "";
+    /// <summary>Límite pedido al celular porque este PC no alcanzó (0 = sin límite).</summary>
+    private int _limitHeight;
+    private long _limitPixelRate;
+    /// <summary>Lo que no se alcanzó a decodificar (p. ej. "4K30"), para mostrarlo.</summary>
+    private string _limitFrom = "";
 
     // Identidad / red
     public string DeviceId { get; }
@@ -124,7 +157,8 @@ public sealed class PhoneSession : IDisposable
     private long _thumbVersion;
     private long _lastThumbMs;
 
-    private record struct ReportCounters(long Expected, long Missing, long Lost, long Dropped, long Output, long Bytes);
+    private record struct ReportCounters(long Expected, long Missing, long Lost, long NetDropped, long Late, long Output, long Bytes);
+    private long _staleSkipped;
 
     public PhoneSession(string deviceId, ReceiverSettings settings, Action<IPEndPoint, byte[]> send)
     {
@@ -175,15 +209,22 @@ public sealed class PhoneSession : IDisposable
     public void OnHello(HelloMessage hello, uint sessionId, IPEndPoint ep, long now)
     {
         bool rename = false;
+        DecodeCapsMessage decode;
+        int jitter;
         lock (_gate)
         {
             if (sessionId != SessionId)
             {
-                if (SessionId != 0) Log.Info($"{DeviceId}: nueva sesión {sessionId:X8} (antes {SessionId:X8}), reinicio del flujo");
+                if (SessionId != 0)
+                {
+                    Log.Info($"{DeviceId}: nueva sesión {sessionId:X8} (antes {SessionId:X8}), reinicio del flujo");
+                    // La app del celular se reinició: se vuelve a intentar con lo que elija (el límite era de antes).
+                    if (_limitPixelRate > 0) Log.Info($"{DeviceId}: se quita el límite de resolución de la sesión anterior");
+                    ClearLimitLocked();
+                }
                 SessionId = sessionId;
                 _assembler.Reset();
                 _recreateDecoder = true;
-                _offsetCount = 0;
                 _rangeDetector.Reset();
             }
             if (!_settings.Names.ContainsKey(DeviceId) && DefaultName(hello) != DefaultName(_hello) && _ndi != null) rename = true;
@@ -191,26 +232,93 @@ public sealed class PhoneSession : IDisposable
             Endpoint = ep;
             _lastHelloMs = now;
             _lastPacketMs = now;
+            if (!hello.Streaming && !_standby) EnterStandbyLocked();
             _standby = !hello.Streaming;
-            int jitter = _settings.UsePhoneLatencyMode ? ReceiverSettings.JitterForMode(hello.LatencyMode, _settings.JitterMs) : _settings.JitterMs;
+            jitter = _settings.UsePhoneLatencyMode ? ReceiverSettings.JitterForMode(hello.LatencyMode, _settings.JitterMs) : _settings.JitterMs;
             _assembler.JitterMs = jitter;
+            decode = BuildDecodeCapsLocked();
         }
         if (rename) RequestRename(null);
         var ack = new HelloAckMessage
         {
             Receiver = Environment.MachineName,
             NdiName = NdiName,
-            JitterMs = _assembler.JitterMs,
+            JitterMs = jitter,
             Accepted = true,
+            Decode = decode,
         };
         _send(ep, Protocol.BuildJson(Protocol.HelloAck, sessionId, ack));
         _signal.Set();
     }
 
+    private static readonly int[] StandardHeights = { 2160, 1440, 1080, 720 };
+
+    /// <summary>Qué decodifica este PC por GPU, descontando lo que ya falló de verdad con este celular.</summary>
+    private DecodeCapsMessage BuildDecodeCapsLocked()
+    {
+        var caps = DecoderProbe.Current;
+        // Con "Decodificar con: CPU" no sirve que el celular elija el códec pensando en la GPU:
+        // sin GPU conviene H.264 (la CPU lo decodifica bastante más rápido que H.265).
+        bool cpuOnly = _settings.Decoder == "cpu";
+        bool limit = _settings.AutoLowerResolution;
+        return new DecodeCapsMessage
+        {
+            Probed = caps.Probed,
+            HevcGpuMaxHeight = cpuOnly ? 0 : GpuMaxHeightLocked(VideoCodec.Hevc, caps),
+            H264GpuMaxHeight = cpuOnly ? 0 : GpuMaxHeightLocked(VideoCodec.H264, caps),
+            MaxHeight = limit ? _limitHeight : 0,
+            MaxPixelRate = limit ? _limitPixelRate : 0,
+            Gpu = caps.GpuName,
+        };
+    }
+
+    private int GpuMaxHeightLocked(VideoCodec codec, DecoderCaps caps)
+    {
+        int h = caps.GpuMaxHeight(codec);
+        if (_gpuFailedHeight.TryGetValue(codec, out int failed))
+        {
+            // La GPU no pudo con "failed": se anuncia la altura estándar anterior (si la prueba la cubría).
+            int below = 0;
+            foreach (var x in StandardHeights)
+                if (x < failed && x <= h) { below = x; break; }
+            h = below;
+        }
+        return h;
+    }
+
+    /// <summary>¿Se puede intentar la GPU para este códec a esta altura? (bajo _gate)</summary>
+    private bool GpuAllowedLocked(VideoCodec codec, int height)
+    {
+        if (_settings.Decoder == "cpu") return false;
+        return !_gpuFailedHeight.TryGetValue(codec, out int failed) || (height > 0 && height < failed);
+    }
+
+    private void MarkGpuFailed(VideoCodec codec, int height)
+    {
+        if (height <= 0) height = 1;
+        lock (_gate)
+            _gpuFailedHeight[codec] = _gpuFailedHeight.TryGetValue(codec, out int old) ? Math.Min(old, height) : height;
+    }
+
     public void OnBye(long now)
     {
-        lock (_gate) { _standby = true; _lastPacketMs = now; }
+        lock (_gate)
+        {
+            if (!_standby) EnterStandbyLocked();
+            _standby = true;
+            _lastPacketMs = now;
+        }
         Log.Info($"{NdiName}: el celular dejó de transmitir");
+    }
+
+    /// <summary>
+    /// El celular dejó de transmitir. Con hilos por frame quedan imágenes dentro del decodificador:
+    /// se descarta todo para que al volver no salgan primero imágenes de antes de la pausa.
+    /// </summary>
+    private void EnterStandbyLocked()
+    {
+        _recreateDecoder = true;
+        _assembler.ForceKeyframe();
     }
 
     public void OnPing(long now)
@@ -263,6 +371,53 @@ public sealed class PhoneSession : IDisposable
         }
     }
 
+    /// <summary>Cambió "Decodificar con": se usa el decodificador nuevo desde el próximo keyframe.</summary>
+    public void ApplyDecoderSetting()
+    {
+        lock (_gate)
+        {
+            _recreateDecoder = true;
+            _assembler.ForceKeyframe();
+        }
+        _signal.Set();
+    }
+
+    /// <summary>¿Este PC le pidió al celular menos resolución?</summary>
+    public bool HasLimit { get { lock (_gate) return _limitPixelRate > 0 || _limitHeight > 0; } }
+
+    /// <summary>
+    /// Quita el límite de resolución pedido al celular (p. ej. el PC estuvo ocupado un momento, o el
+    /// usuario desmarcó "Bajar resolución si este PC no alcanza"): el celular vuelve a su máxima.
+    /// </summary>
+    public void ClearLimit()
+    {
+        IPEndPoint? ep;
+        uint sid;
+        bool had;
+        lock (_gate)
+        {
+            had = _limitPixelRate > 0 || _limitHeight > 0;
+            ClearLimitLocked();
+            ep = Endpoint;
+            sid = SessionId;
+        }
+        if (!had) return;
+        Log.Info($"{DeviceId}: se quitó el límite de resolución; el celular vuelve a su máxima");
+        if (ep == null) return;
+        var msg = Protocol.BuildJson(Protocol.Limit, sid, new LimitMessage { MaxHeight = 0, MaxPixelRate = 0, Reason = "" });
+        for (int i = 0; i < 2; i++) _send(ep, msg);
+    }
+
+    private void ClearLimitLocked()
+    {
+        _limitHeight = 0;
+        _limitPixelRate = 0;
+        _limitFrom = "";
+        _overloadWarning = "";
+        _overloadTicks = 0;
+        _lastLimitMs = -60_000;
+    }
+
     // ---------------- Hilo de trabajo ----------------
 
     private void Run()
@@ -303,7 +458,23 @@ public sealed class PhoneSession : IDisposable
             while ((f = _assembler.NextFrame(now)) != null)
             {
                 (frames ??= new()).Add(f);
-                if (frames.Count > 8) break; // nunca acumulamos: si hay muchos, se decodifican en la vuelta siguiente
+                // Lotes cortos: si decodificar es lento, la salida, la miniatura y las estadísticas
+                // no se congelan esperando al lote entero. Lo que quede, en la vuelta siguiente.
+                if (frames.Count >= 3) break;
+            }
+            // Si el decodificador no da abasto, los frames se acumulan: nunca dejamos que eso
+            // se convierta en segundos de retraso. Se salta al keyframe más nuevo.
+            int fpsIn = _hello.Fps > 0 ? _hello.Fps : 30;
+            int backlogLimit = Math.Max(12, fpsIn * (_assembler.JitterMs + 300) / 1000);
+            if (_assembler.PendingFrames > backlogLimit)
+            {
+                int dropped = _assembler.DropBacklog();
+                _backlogDrops++;
+                if (now - _lastBacklogLogMs > 10_000)
+                {
+                    _lastBacklogLogMs = now;
+                    Log.Warn($"{DeviceId}: el PC no alcanza a decodificar; se saltaron {dropped} frames para no acumular retraso");
+                }
             }
             needKf = _assembler.NeedKeyframe && now - _lastPacketMs < 2000 && !_standby;
             rename = _pendingRename; _pendingRename = null;
@@ -332,10 +503,13 @@ public sealed class PhoneSession : IDisposable
 
         if (frames != null)
         {
-            foreach (var fr in frames) DecodeOne(fr);
+            // Sacar imagen después de cada frame: si decodificar es lento, la salida no espera al lote entero.
+            foreach (var fr in frames) { DecodeOne(fr); Output(Clock.NowMs); }
         }
-
-        Output(Clock.NowMs);
+        else
+        {
+            Output(Clock.NowMs);
+        }
 
         if (now - _lastStatsMs >= 500) UpdateStats(now, ep, sid);
 
@@ -356,47 +530,130 @@ public sealed class PhoneSession : IDisposable
         _lastFrameArrivalMs = fr.CompletedMs;
         _lastFramePtsUs = fr.PtsUs;
 
+        if (_retryGpuAtKeyframe && fr.Keyframe && _decoder != null && _decoder.Codec == fr.Codec)
+        {
+            // El video bajó a una resolución que la GPU sí decodifica: volver a la GPU.
+            Log.Info($"{DeviceId}: el video bajó a {_lastDecodedHeight}p; se vuelve a decodificar con la GPU");
+            if (!CreateDecoder(fr.Codec, _lastDecodedHeight)) return;
+        }
         if (_decoder == null || _decoder.Codec != fr.Codec)
         {
             if (!fr.Keyframe) return;
-            ResetDecoder();
-            try { _decoder = new VideoDecoder(fr.Codec, _settings.Decoder); }
-            catch (Exception ex)
-            {
-                Log.Error($"{DeviceId}: no se pudo crear el decodificador", ex);
-                return;
-            }
+            int h;
+            lock (_gate) h = _hello.Height;
+            if (!CreateDecoder(fr.Codec, h)) return;
         }
+
+        _inFlight[fr.PtsUs] = (fr.FrameId, fr.FirstArrivalMs);
+        if (_inFlight.Count > 128) _inFlight.Clear(); // algo raro pasó: no dejar crecer
 
         double t0 = Clock.NowMsPrecise;
-        var res = _decoder.Decode(fr.Data, fr.Length, fr.PtsUs, _pool.Rent, out var buf);
+        _decoded.Clear();
+        var res = _decoder!.Decode(fr.Data, fr.Length, fr.PtsUs, _pool.Rent, _decoded);
+        if (TestDecodeDelayMs > 0) Thread.Sleep(TestDecodeDelayMs);
         _decodeSum += Clock.NowMsPrecise - t0;
         _decodeCount++;
-        if (res == VideoDecoder.Result.Error)
+
+        if (_decoder.HwFellBack)
         {
+            // La GPU no pudo con este video: FFmpeg siguió en CPU con un solo hilo (lento).
+            // Recrear el decodificador en CPU con todos los núcleos y empezar en el próximo keyframe.
+            int h = _decoder.FellBackHeight;
+            if (h <= 0) lock (_gate) h = _hello.Height;
+            MarkGpuFailed(fr.Codec, h);
+            Log.Warn($"{DeviceId}: la GPU no decodifica {fr.Codec} de {h}p; se usa la CPU con varios hilos");
+            foreach (var b in _decoded) _pool.Return(b);
+            _decoded.Clear();
+            ResetDecoder();
             lock (_gate) _assembler.ForceKeyframe();
-            _pool.Return(buf);
             return;
         }
-        if (buf == null) return;
-        buf.FrameId = fr.FrameId;
-        buf.PtsUs = fr.PtsUs;
-        buf.FirstArrivalMs = fr.FirstArrivalMs;
-        buf.DecodedMs = Clock.NowMs;
-        FixColor(buf);
+        if (_decoded.Count > 0) _hwErrorStreak = 0;
+        if (res == VideoDecoder.Result.Error)
+        {
+            if (_decoder.IsHardware && _decoded.Count == 0 && ++_hwErrorStreak >= 3)
+            {
+                // La GPU arrancó bien pero ahora falla en cada imagen (driver reiniciado, memoria de video…):
+                // sin esto la imagen quedaría congelada pidiendo keyframes para siempre.
+                int h = _lastDecodedHeight;
+                if (h <= 0) lock (_gate) h = _hello.Height;
+                MarkGpuFailed(fr.Codec, h);
+                Log.Warn($"{DeviceId}: la GPU falla al decodificar {fr.Codec}; se pasa a la CPU");
+                ResetDecoder();
+            }
+            lock (_gate) _assembler.ForceKeyframe();
+        }
 
-        // Relación reloj del celular -> reloj local (mínimo de la ventana = camino más rápido).
-        _offsetWindow[_offsetIdx] = fr.CompletedMs - fr.PtsUs / 1000.0;
-        _offsetIdx = (_offsetIdx + 1) % _offsetWindow.Length;
-        if (_offsetCount < _offsetWindow.Length) _offsetCount++;
-
-        _playout.Add(buf);
+        long now = Clock.NowMs;
+        foreach (var buf in _decoded)
+        {
+            _decodedTotal++;
+            if (_inFlight.Remove(buf.PtsUs, out var info))
+            {
+                buf.FrameId = info.FrameId;
+                buf.FirstArrivalMs = info.FirstArrivalMs;
+            }
+            else
+            {
+                buf.FirstArrivalMs = now;
+            }
+            buf.DecodedMs = now;
+            // Relación reloj del celular -> reloj local, medida cuando la imagen SALE del decodificador
+            // (con hilos por frame sale unos frames después de llegar: eso también entra en la cuenta).
+            // El mínimo de la ventana es el camino más rápido; el suavizado se mide desde ahí.
+            _offsetWindow[_offsetIdx] = now - buf.PtsUs / 1000.0;
+            _offsetIdx = (_offsetIdx + 1) % _offsetWindow.Length;
+            if (_offsetCount < _offsetWindow.Length) _offsetCount++;
+            _lastDecodedHeight = buf.Height;
+            FixColor(buf);
+            _playout.Add(buf);
+        }
+        _decoded.Clear();
+        if (_decoderForcedCpu && !_retryGpuAtKeyframe && _lastDecodedHeight > 0)
+        {
+            bool ok;
+            lock (_gate) ok = GpuAllowedLocked(_decoder!.Codec, _lastDecodedHeight);
+            var caps = DecoderProbe.Current;
+            if (ok && (!caps.Probed || caps.GpuMaxHeight(_decoder!.Codec) >= _lastDecodedHeight)) _retryGpuAtKeyframe = true;
+        }
         // Nunca dejamos crecer la cola más de lo que pide el suavizado: se tiran las más viejas.
         while (_playout.Count > MaxPlayoutFrames())
         {
             _pool.Return(_playout[0]);
             _playout.RemoveAt(0);
             _lateSkipped++;
+        }
+    }
+
+    /// <param name="height">Altura del video que viene (para no repetir la GPU donde ya falló).</param>
+    private bool CreateDecoder(VideoCodec codec, int height)
+    {
+        ResetDecoder();
+        IEnumerable<string> hw;
+        var caps = DecoderProbe.Current;
+        string mode;
+        bool gpuAllowed;
+        lock (_gate)
+        {
+            mode = _hello.LatencyMode;
+            gpuAllowed = GpuAllowedLocked(codec, height);
+        }
+        if (!gpuAllowed) hw = Array.Empty<string>();
+        else if (caps.Probed && caps.HwFor(codec) is string ok) hw = new[] { ok };
+        else if (caps.Probed && _settings.Decoder != "gpu") hw = Array.Empty<string>(); // la prueba dijo que la GPU no puede
+        else hw = VideoDecoder.PlatformHwTypes();
+        try
+        {
+            _decoder = new VideoDecoder(codec, hw, lowLatency: !ReceiverSettings.IsQualityMode(mode));
+            _decoderCreatedMs = Clock.NowMs;
+            _decoderForcedCpu = !gpuAllowed && _settings.Decoder != "cpu";
+            lock (_gate) _overloadTicks = 0;
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Log.Error($"{DeviceId}: no se pudo crear el decodificador", ex);
+            return false;
         }
     }
 
@@ -459,8 +716,20 @@ public sealed class PhoneSession : IDisposable
     {
         if (_playout.Count == 0) return;
         string mode;
-        lock (_gate) mode = _hello.LatencyMode;
+        int jitter;
+        lock (_gate) { mode = _hello.LatencyMode; jitter = _assembler.JitterMs; }
         int smoothing = ReceiverSettings.SmoothingForMode(mode);
+
+        // Imágenes de hace segundos (p. ej. las que quedaron dentro del decodificador antes de una
+        // pausa o de un corte del WiFi) nunca salen al aire.
+        int staleMs = jitter + smoothing + 1500;
+        while (_playout.Count > 0 && now - _playout[0].FirstArrivalMs > staleMs)
+        {
+            _pool.Return(_playout[0]);
+            _playout.RemoveAt(0);
+            _staleSkipped++;
+        }
+        if (_playout.Count == 0) return;
 
         int lastDue = -1;
         if (smoothing <= 0 || _offsetCount < 10)
@@ -486,9 +755,11 @@ public sealed class PhoneSession : IDisposable
 
         int fps;
         lock (_gate) fps = _hello.Fps > 0 ? _hello.Fps : 30;
-        if (_ndi == null && !_ndiAttempted)
+        if (_ndi == null && (!_ndiAttempted || (NdiLib.IsLoaded && !_ndiWasLoadedAtAttempt)))
         {
+            // También se reintenta si NDI se instaló/cargó después de conectarse el celular.
             _ndiAttempted = true;
+            _ndiWasLoadedAtAttempt = NdiLib.IsLoaded;
             _ndi = NdiSender.TryCreate(NdiName);
         }
 
@@ -503,6 +774,7 @@ public sealed class PhoneSession : IDisposable
     }
 
     private bool _ndiAttempted;
+    private bool _ndiWasLoadedAtAttempt;
 
     private void RecreateNdi(string name)
     {
@@ -515,8 +787,15 @@ public sealed class PhoneSession : IDisposable
     {
         _decoder?.Dispose();
         _decoder = null;
+        _inFlight.Clear();
         foreach (var b in _playout) _pool.Return(b);
         _playout.Clear();
+        // El retraso del decodificador nuevo puede ser otro (GPU vs. CPU con hilos): medir de nuevo.
+        _offsetCount = 0;
+        _offsetIdx = 0;
+        _retryGpuAtKeyframe = false;
+        _decoderForcedCpu = false;
+        _hwErrorStreak = 0;
     }
 
     private void MaybeThumbnail(VideoBuffer b, long now)
@@ -542,15 +821,17 @@ public sealed class PhoneSession : IDisposable
         long lastPacket, lastHello;
         bool standby;
         int jitterBuf;
+        long started;
         lock (_gate)
         {
             cur = new ReportCounters(_assembler.ExpectedPackets, _assembler.MissingPackets, _assembler.LostPackets,
-                _assembler.FramesDropped + _lateSkipped, _framesOutput, _assembler.BytesReceived);
+                _assembler.FramesDropped, _lateSkipped, _framesOutput, _assembler.BytesReceived);
             hello = _hello; lastPacket = _lastPacketMs; lastHello = _lastHelloMs; standby = _standby;
             jitterBuf = _assembler.JitterMs;
+            started = _assembler.FramesStarted;
         }
         var d = new ReportCounters(cur.Expected - _prev.Expected, cur.Missing - _prev.Missing, cur.Lost - _prev.Lost,
-            cur.Dropped - _prev.Dropped, cur.Output - _prev.Output, cur.Bytes - _prev.Bytes);
+            cur.NetDropped - _prev.NetDropped, cur.Late - _prev.Late, cur.Output - _prev.Output, cur.Bytes - _prev.Bytes);
         _prev = cur;
 
         _outputFps = d.Output * 1000.0 / dt;
@@ -558,21 +839,31 @@ public sealed class PhoneSession : IDisposable
         _lossPct = d.Expected > 0 ? 100.0 * d.Missing / d.Expected : 0;
         _lostPct = d.Expected > 0 ? 100.0 * d.Lost / d.Expected : 0;
         _avgLatency = _latencyCount > 0 ? _latencySum / _latencyCount : _avgLatency;
-        double decodeAvg = _decodeCount > 0 ? _decodeSum / _decodeCount : 0;
         _latencySum = 0; _latencyCount = 0; _decodeSum = 0; _decodeCount = 0;
         _ndiConnections = _ndi?.Connections ?? 0;
 
         uint suggested = 0;
-        double frameMs = 1000.0 / Math.Max(1, hello.Fps);
         int current = hello.BitrateKbps > 0 ? hello.BitrateKbps : (int)(_rxMbps * 1000);
-        if (ReceiverSettings.IsQualityMode(hello.LatencyMode))
+        // ¿El PC alcanza a decodificar lo que llega? (si no, bajar bitrate NO sirve: es la resolución)
+        // Lo que llega = frames que empezaron a llegar menos los que perdió la red (esos nunca llegan
+        // al decodificador y no son culpa del PC).
+        long inFrames = (started - _prevStarted) - d.NetDropped, decFrames = _decodedTotal - _prevDecoded;
+        long backlogDrops = _backlogDrops - _prevBacklogDrops;
+        _prevStarted = started; _prevDecoded = _decodedTotal; _prevBacklogDrops = _backlogDrops;
+        bool overloaded = CheckOverload(now, dt, inFrames, decFrames, backlogDrops, hello, ep, sid);
+        // Al celular sólo se le cuenta lo que es culpa de la red: si el PC no alcanza, los frames que
+        // salen tarde o se saltan no se arreglan bajando el bitrate (eso sólo quitaría nitidez).
+        long dropped = d.NetDropped + (overloaded ? 0 : d.Late);
+
+        if (!overloaded)
         {
-            // En calidad el buffer grande absorbe las pérdidas: sólo pedimos bajar si aun así se perdieron frames.
-            if (d.Expected > 20 && d.Dropped > 1) suggested = (uint)(current * 0.85);
-            else if (decodeAvg > frameMs * 0.9) suggested = (uint)(current * 0.85);
+            if (ReceiverSettings.IsQualityMode(hello.LatencyMode))
+            {
+                // En calidad el buffer grande absorbe las pérdidas: sólo pedimos bajar si aun así se perdieron frames de la red.
+                if (d.Expected > 20 && dropped > 1 && _lostPct > 0) suggested = (uint)(current * 0.85);
+            }
+            else if (d.Expected > 20 && (dropped > 0 || _lostPct > 2)) suggested = (uint)(current * 0.7);
         }
-        else if (d.Expected > 20 && (d.Dropped > 0 || _lostPct > 2)) suggested = (uint)(current * 0.7);
-        else if (decodeAvg > frameMs * 0.8) suggested = (uint)(current * 0.8);
 
         if (ep != null && now - lastPacket < 3000)
         {
@@ -583,7 +874,7 @@ public sealed class PhoneSession : IDisposable
                 MissingPackets = (uint)Math.Max(0, d.Missing),
                 LostPackets = (uint)Math.Max(0, d.Lost),
                 FramesOutput = (uint)Math.Max(0, d.Output),
-                FramesDropped = (uint)Math.Max(0, d.Dropped),
+                FramesDropped = (uint)Math.Max(0, dropped),
                 JitterMs = _jitterMs,
                 ReceiverLatencyMs = _avgLatency,
                 SuggestedBitrateKbps = suggested,
@@ -621,6 +912,64 @@ public sealed class PhoneSession : IDisposable
         lock (_gate) _snapshot = snap;
     }
 
+    /// <summary>Por debajo de esto (720p30) ya no tiene sentido pedir menos: sólo se avisa.</summary>
+    private const long MinLimitPixelRate = 1280L * 720 * 30;
+
+    /// <summary>
+    /// Si durante ~2 s se decodifican bastante menos frames de los que llegan (o hubo que saltar
+    /// frames acumulados), el PC no alcanza con esta resolución. Se avisa y, si el usuario lo permite,
+    /// se le pide al celular menos píxeles por segundo (mensaje LIMIT). Devuelve true si hay sobrecarga.
+    /// </summary>
+    private bool CheckOverload(long now, double dt, long inFrames, long decFrames, long backlogDrops, HelloMessage hello, IPEndPoint? ep, uint sid)
+    {
+        byte[]? limitMsg = null;
+        bool overloaded;
+        lock (_gate)
+        {
+            if (_decoder == null || now - _decoderCreatedMs < 3000 || _standby)
+            {
+                _overloadTicks = 0;
+                _overloadWarning = "";
+                return false;
+            }
+            double inFps = inFrames * 1000.0 / dt, decFps = decFrames * 1000.0 / dt;
+            bool slow = backlogDrops > 0 || (inFps > 5 && decFps < inFps * 0.85);
+            if (slow) _overloadTicks = Math.Min(_overloadTicks + 1, 6);
+            else if (decFps >= inFps * 0.95) _overloadTicks = Math.Max(0, _overloadTicks - 1);
+            if (_overloadTicks == 0) _overloadWarning = ""; // volvió a ir a la par
+            overloaded = _overloadTicks >= 2;
+
+            // Sólo se actúa si la sobrecarga es sostenida Y este intervalo también fue lento.
+            if (slow && _overloadTicks >= 4)
+            {
+                string res = (hello.Height >= 2160 ? "4K" : $"{hello.Height}p") + hello.Fps;
+                long rate = (long)hello.Width * hello.Height * Math.Max(1, hello.Fps);
+                if (_settings.AutoLowerResolution && rate > MinLimitPixelRate && ep != null && now - _lastLimitMs > 15_000)
+                {
+                    _lastLimitMs = now;
+                    _limitHeight = hello.Height;
+                    _limitPixelRate = (long)(rate * 0.8);
+                    _limitFrom = res;
+                    _overloadTicks = 0;
+                    _overloadWarning = "";
+                    string reason = $"Este PC no alcanzó a decodificar {res} ({_decoder.Backend}); se pidió menos resolución al celular.";
+                    Log.Warn($"{DeviceId}: {reason}");
+                    limitMsg = Protocol.BuildJson(Protocol.Limit, sid,
+                        new LimitMessage { MaxHeight = _limitHeight, MaxPixelRate = _limitPixelRate, Reason = reason });
+                }
+                else if (!_settings.AutoLowerResolution || rate <= MinLimitPixelRate)
+                {
+                    _overloadWarning = $"Este PC no alcanza a decodificar {res} ({_decoder.Backend}): la imagen va a saltos." +
+                        (_settings.AutoLowerResolution ? " Cierra otros programas pesados o usa menos celulares."
+                            : " Activa \"Bajar resolución si este PC no alcanza\" o elige menos resolución en el celular.");
+                }
+            }
+        }
+        if (limitMsg != null && ep != null)
+            for (int i = 0; i < 2; i++) _send(ep, limitMsg);
+        return overloaded;
+    }
+
     private SessionSnapshot BuildSnapshot(SessionState state, HelloMessage? h = null, int jitterBuf = 0)
     {
         h ??= new HelloMessage();
@@ -628,11 +977,18 @@ public sealed class PhoneSession : IDisposable
         string name;
         if (_settings.Names.TryGetValue(DeviceId, out var custom) && !string.IsNullOrWhiteSpace(custom)) name = custom;
         else name = DefaultName(h);
+        string warning, limitInfo;
+        lock (_gate)
+        {
+            bool limited = (_limitPixelRate > 0 || _limitHeight > 0) && _settings.AutoLowerResolution;
+            limitInfo = limited ? $"Este PC no alcanzaba {(_limitFrom.Length > 0 ? _limitFrom : "la resolución anterior")}: se pidió menos resolución al celular." : "";
+            warning = _overloadWarning.Length > 0 ? _overloadWarning : limitInfo;
+        }
         return new SessionSnapshot(
             DeviceId, name, h.Name, h.Model, state, h.Codec.ToUpperInvariant(), h.Width, h.Height, h.Fps,
             _outputFps, _rxMbps, h.BitrateKbps, _lossPct, _lostPct, _jitterMs, _avgLatency,
             state == SessionState.EnVivo ? total : 0, h.RttMs,
-            _assembler.FramesDropped + _lateSkipped,
+            _assembler.FramesDropped + _assembler.FramesSkippedSlowPc + _lateSkipped + _staleSkipped,
             _decoder?.Backend ?? "-", _ndiConnections, h.ThermalLevel, h.BatteryPct, h.BatteryTempC, h.Charging,
             h.LatencyMode, jitterBuf, Endpoint?.ToString() ?? "",
             h.CpuPct,
@@ -641,7 +997,9 @@ public sealed class PhoneSession : IDisposable
             _minFpsLive == double.MaxValue ? 0 : _minFpsLive,
             _maxTempC,
             _colorInfo,
-            RangeOverride);
+            RangeOverride,
+            warning,
+            limitInfo);
     }
 
     public void Dispose()

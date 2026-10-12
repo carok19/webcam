@@ -4,6 +4,8 @@ using CamaraNdi.Sim;
 // Uso: SimSender [--host 192.168.1.10] [--port 47810] [--size 1920x1080] [--fps 30]
 //                [--kbps 6000] [--codec h264|hevc] [--loss 0.02] [--seconds 60] [--name "Sim 1"]
 //      SimSender --receiver   (arranca un receptor sin interfaz, útil en Linux para pruebas)
+//                [--slow 70]        (simula un PC lento: ms extra por frame decodificado)
+//                [--clear-after 12] (a los N s quita el límite de resolución pedido a los celulares)
 var a = args.ToList();
 string Arg(string name, string def) { int i = a.IndexOf(name); return i >= 0 && i + 1 < a.Count ? a[i + 1] : def; }
 
@@ -12,11 +14,23 @@ if (a.Contains("--receiver"))
     var settings = new ReceiverSettings();
     using var server = new ReceiverServer(settings);
     Console.WriteLine($"Receptor sin interfaz escuchando en {server.MediaPort}. Ctrl+C para salir.");
+    int slow = int.Parse(Arg("--slow", "0"));
+    int clearAfter = int.Parse(Arg("--clear-after", "0"));
+    var clock = System.Diagnostics.Stopwatch.StartNew();
+    bool cleared = false;
     while (true)
     {
         Thread.Sleep(1000);
         foreach (var s in server.Sessions)
         {
+            s.TestDecodeDelayMs = cleared ? 0 : slow;
+            if (clearAfter > 0 && !cleared && clock.Elapsed.TotalSeconds >= clearAfter)
+            {
+                cleared = true;
+                s.TestDecodeDelayMs = 0;
+                s.ClearLimit();
+                Console.WriteLine("Se quitó el límite de resolución");
+            }
             var x = s.Snapshot;
             Console.WriteLine($"{x.NdiName}: {x.State} {x.Width}x{x.Height} {x.OutputFps:F1} fps {x.RxMbps:F2} Mbps pérdida {x.LossPct:F1}% no recuperado {x.LostPct:F2}% lat {x.ReceiverLatencyMs:F1} ms dec {x.Decoder}");
         }

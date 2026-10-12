@@ -90,6 +90,23 @@ en cualquier keyframe.
 | 0x85 | REPORT | ver abajo, cada 500 ms |
 | 0x86 | DISCONNECT | JSON `{"reason":"…"}` — el usuario pulsó "Desconectar" |
 | 0x87 | DISCOVER_REPLY | JSON `{"receiver":"PC-SALA","port":47810,"version":1}` |
+| 0x88 | LIMIT | JSON `{"maxHeight":2160,"maxPixelRate":199065600,"reason":"…"}` — el PC no alcanzó a decodificar: usar un modo con altura ≤ `maxHeight` y ancho × alto × fps ≤ `maxPixelRate`. Los dos en 0 = se quitó el límite |
+
+`maxPixelRate` es el 80 % de los píxeles por segundo que el PC no alcanzó (4K30 → 1440p30 o 1080p60;
+1440p30 → 1080p30, nunca 1080p60, que pesa más). El receptor manda LIMIT sólo con sobrecarga sostenida
+(≈2 s) y como mucho una vez cada 15 s; las pérdidas de la red no cuentan como sobrecarga. El límite se quita
+con "Quitar límite" o al desmarcar "Bajar resolución si este PC no alcanza" (LIMIT con todo en 0), cuando la app
+del celular se reinicia (sesión nueva), o en el celular al elegir una resolución a mano.
+
+HELLO_ACK incluye además `"decode":{"probed":true,"hevcGpuMaxHeight":2160,"h264GpuMaxHeight":2160,"maxHeight":0,"maxPixelRate":0,"gpu":"NVIDIA …"}`:
+lo que decodifica la GPU del PC (0 = no puede; con "Decodificar con: CPU" siempre 0) y el límite vigente
+(0 = ninguno). El celular aplica el límite del HELLO_ACK sólo cuando cambia (el ACK se repite cada segundo).
+En automático elige la mayor resolución que sostiene (con sus fps máximos) dentro del límite, y el códec que la
+GPU decodifica a esa altura (H.265 primero; si la GPU no puede con ninguno, H.264, que la CPU decodifica más rápido).
+Si la GPU falla de verdad con una resolución, el receptor anuncia desde entonces la altura estándar anterior.
+
+En REPORT, `framesDropped` cuenta sólo lo que perdió la red: los frames que se saltan porque el PC no alcanza
+a decodificar no se informan (bajar el bitrate no lo arreglaría y sólo quitaría nitidez).
 
 ### REPORT (0x85)
 | Offset | Tipo | Campo |

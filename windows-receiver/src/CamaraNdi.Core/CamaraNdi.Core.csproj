@@ -9,4 +9,8 @@
   <ItemGroup>
     <InternalsVisibleTo Include="CamaraNdi.Tests" />
   </ItemGroup>
+  <ItemGroup>
+    <!-- Muestras diminutas (1 imagen) para probar al arrancar qué decodifica la GPU -->
+    <EmbeddedResource Include="Samples\*.bin" />
+  </ItemGroup>
 </Project>

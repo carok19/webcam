@@ -16,6 +16,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private static readonly Brush OkText = Frozen(Color.FromRgb(0xE8, 0xEA, 0xED));
     private static readonly Brush BadText = Frozen(Color.FromRgb(0xFF, 0x8A, 0x80));
     private static readonly Brush MidText = Frozen(Color.FromRgb(0xFF, 0xD1, 0x80));
+    private static readonly Brush OkThermal = Frozen(Color.FromRgb(0x43, 0xA0, 0x47));
 
     private static Brush Frozen(Color c) { var b = new SolidColorBrush(c); b.Freeze(); return b; }
 
@@ -32,6 +33,11 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     public string StateText { get; private set; } = "";
     public Brush StateBrush { get; private set; } = IdleBrush;
     public string Phone { get; private set; } = "";
+    public Brush ThermalBrush { get; private set; } = OkThermal;
+    public string Warning { get; private set; } = "";
+    public Visibility WarningVisibility { get; private set; } = Visibility.Collapsed;
+    /// <summary>Se ve el botón "Quitar límite" cuando este PC le pidió al celular menos resolución.</summary>
+    public Visibility LimitVisibility { get; private set; } = Visibility.Collapsed;
     public string Video { get; private set; } = "";
     public string Bitrate { get; private set; } = "";
     public string Loss { get; private set; } = "";
@@ -72,10 +78,14 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             SessionState.Desconectado => ("Desconectado", IdleBrush),
             _ => ("Conectando…", IdleBrush),
         };
-        string bat = x.BatteryPct >= 0 ? $"🔋{x.BatteryPct}%{(x.Charging ? "⚡" : "")}" : "";
+        // Sin emojis: WPF no los dibuja en color y salen como cuadritos.
+        string bat = x.BatteryPct >= 0 ? $"bat. {x.BatteryPct}%{(x.Charging ? " (cargando)" : "")}" : "";
         string temp = x.BatteryTempC > 0 ? $"{x.BatteryTempC:F0}°C" : "";
-        string therm = x.ThermalLevel switch { "hot" => "🔴", "warm" => "🟡", _ => "🟢" };
-        Phone = $"{therm} {temp} {bat}".Trim();
+        Phone = string.Join(" · ", new[] { temp, bat }.Where(t => t.Length > 0));
+        ThermalBrush = x.ThermalLevel switch { "hot" => LiveBrush, "warm" => WarnBrush, _ => OkThermal };
+        Warning = x.Warning;
+        WarningVisibility = string.IsNullOrEmpty(x.Warning) ? Visibility.Collapsed : Visibility.Visible;
+        LimitVisibility = string.IsNullOrEmpty(x.LimitInfo) ? Visibility.Collapsed : Visibility.Visible;
         Video = x.Width > 0 ? $"{Label(x.Width, x.Height)}{x.Fps} {x.Codec}  ·  salida {x.OutputFps:F0} fps" : "-";
         Bitrate = $"{x.RxMbps:F1} Mbps recibidos (celular {x.PhoneBitrateKbps / 1000.0:F1})";
         Loss = $"{x.LossPct:F1} % (no recuperado {x.LostPct:F2} %)  ·  descartados {x.FramesDropped}";
@@ -88,7 +98,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         ColorInfo = x.ColorInfo;
         var t = TimeSpan.FromSeconds(x.LiveSeconds);
         Test = x.LiveSeconds > 0
-            ? $"{(int)t.TotalMinutes:00}:{t.Seconds:00} en vivo · {x.AvgFpsLive:F1} fps prom (mín {x.MinFpsLive:F0}) · temp máx {x.MaxTempC:F0}°C · CPU app {x.CpuPct:F0}%"
+            ? $"{(int)t.TotalMinutes:00}:{t.Seconds:00} en vivo · {x.AvgFpsLive:F1} fps prom (mín {x.MinFpsLive:F0}) · celular: temp máx {x.MaxTempC:F0}\u00A0°C, CPU de la app {x.CpuPct:F0}\u00A0%"
             : "-";
 
         if (Session.TryGetThumbnail(ref _thumbVersion, out var bgra, out int w, out int h) && bgra != null)

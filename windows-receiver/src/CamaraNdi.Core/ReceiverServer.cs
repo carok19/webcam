@@ -30,6 +30,8 @@ public sealed class ReceiverServer : IDisposable
     public ReceiverServer(ReceiverSettings settings)
     {
         _settings = settings;
+        // Probar en segundo plano qué decodifica la GPU (los celulares lo reciben en HELLO_ACK).
+        Decoding.DecoderProbe.StartAsync();
         _media = CreateUdp(settings.MediaPort, 8 * 1024 * 1024);
         MediaPort = ((IPEndPoint)_media.LocalEndPoint!).Port;
         _discovery = CreateUdp(settings.DiscoveryPort, 256 * 1024, allowBroadcast: true);

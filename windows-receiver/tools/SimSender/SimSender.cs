@@ -30,6 +30,12 @@ public sealed unsafe class SimSender : IDisposable
     public bool SignalRange { get; init; } = true;
     /// <summary>Modo que anuncia el "celular": minima, equilibrada, calidad o maxima.</summary>
     public string LatencyMode { get; init; } = "minima";
+    /// <summary>Retraso de red al azar por frame, entre 0 y este valor (sin desordenar los frames).</summary>
+    public int NetJitterMs { get; init; }
+    /// <summary>Simula "Detener" y volver a "Transmitir" en el celular: pausa desde este segundo…</summary>
+    public double PauseAtSec { get; init; } = -1;
+    /// <summary>…durante estos segundos (manda BYE al pausar; al volver, HELLO y un keyframe).</summary>
+    public double PauseForSec { get; init; }
 
     public long FramesSent { get; private set; }
     public long PacketsSent { get; private set; }
@@ -40,6 +46,10 @@ public sealed unsafe class SimSender : IDisposable
     public ReportData LastReport { get; private set; }
     public double LastRttMs { get; private set; }
     public bool Disconnected { get; private set; }
+    /// <summary>Último pedido de límite de resolución del receptor (PC que no alcanza).</summary>
+    public LimitMessage? LastLimit { get; private set; }
+    /// <summary>Capacidades de decodificación que anunció el receptor en HELLO_ACK.</summary>
+    public DecodeCapsMessage? Caps { get; private set; }
 
     private readonly uint _sessionId = (uint)Random.Shared.Next(1, int.MaxValue);
     private Socket? _sock;
@@ -52,6 +62,9 @@ public sealed unsafe class SimSender : IDisposable
     private volatile bool _forceKey = true;
     private volatile bool _running;
     private Random _rnd = new(1);
+    private readonly System.Collections.Concurrent.BlockingCollection<(long DueMs, List<byte[]> Packets)> _delayed = new();
+    private long _lastDueMs;
+    private System.Diagnostics.Stopwatch _clock = new();
 
     public void Run(TimeSpan duration, CancellationToken ct = default)
     {
@@ -63,6 +76,13 @@ public sealed unsafe class SimSender : IDisposable
         _running = true;
         var rx = new Thread(ReceiveLoop) { IsBackground = true };
         rx.Start();
+        _clock = System.Diagnostics.Stopwatch.StartNew();
+        Thread? delayer = null;
+        if (NetJitterMs > 0)
+        {
+            delayer = new Thread(DelayLoop) { IsBackground = true };
+            delayer.Start();
+        }
 
         var encName = Codec == VideoCodec.Hevc ? "libx265" : "libx264";
         var enc = ffmpeg.avcodec_find_encoder_by_name(encName);
@@ -95,10 +115,32 @@ public sealed unsafe class SimSender : IDisposable
         var sw = System.Diagnostics.Stopwatch.StartNew();
         long lastHello = -10_000, lastPing = 0;
         uint pingId = 0;
-        long i = 0;
+        long i = 0, frameBaseI = 0, frameBaseMs = 0;
+        bool paused = false;
         while (sw.Elapsed < duration && !ct.IsCancellationRequested && !Disconnected)
         {
             long nowMs = sw.ElapsedMilliseconds;
+            double sec = nowMs / 1000.0;
+            bool wantPause = PauseAtSec >= 0 && sec >= PauseAtSec && sec < PauseAtSec + PauseForSec;
+            if (wantPause)
+            {
+                if (!paused)
+                {
+                    paused = true;
+                    Send(Protocol.BuildJson(Protocol.Bye, _sessionId, new { }));
+                }
+                Thread.Sleep(5);
+                continue;
+            }
+            if (paused)
+            {
+                // Volver a transmitir: misma sesión, HELLO enseguida y el codificador empieza con un keyframe.
+                paused = false;
+                _forceKey = true;
+                lastHello = -10_000;
+                frameBaseI = i;
+                frameBaseMs = nowMs;
+            }
             if (nowMs - lastHello >= 1000) { lastHello = nowMs; SendHello(); }
             if (nowMs - lastPing >= 250) { lastPing = nowMs; Send(Protocol.BuildPing(_sessionId, pingId++, NowUs())); }
 
@@ -119,10 +161,12 @@ public sealed unsafe class SimSender : IDisposable
                 ffmpeg.av_packet_unref(pkt);
             }
             i++;
-            long next = (i * 1000) / Fps;
+            long next = frameBaseMs + ((i - frameBaseI) * 1000) / Fps;
             long wait = next - sw.ElapsedMilliseconds;
             if (wait > 0) Thread.Sleep((int)wait);
         }
+        _delayed.CompleteAdding();
+        delayer?.Join(1000);
         Send(Protocol.BuildJson(Protocol.Bye, _sessionId, new { }));
         _running = false;
         ffmpeg.av_packet_free(&pkt);
@@ -149,6 +193,7 @@ public sealed unsafe class SimSender : IDisposable
     {
         int count = (data.Length + Protocol.MaxPayload - 1) / Protocol.MaxPayload;
         uint fid = _frameId++;
+        List<byte[]>? later = NetJitterMs > 0 ? new List<byte[]>(count) : null;
         for (int k = 0; k < count; k++)
         {
             var chunk = data.Slice(k * Protocol.MaxPayload, Math.Min(Protocol.MaxPayload, data.Length - k * Protocol.MaxPayload));
@@ -162,10 +207,28 @@ public sealed unsafe class SimSender : IDisposable
                 _ringSeq[seq % _ring.Length] = seq;
             }
             if (LossRate > 0 && _rnd.NextDouble() < LossRate) { PacketsDroppedOnPurpose++; continue; }
-            Send(buf);
+            if (later != null) later.Add(buf);
+            else Send(buf);
             PacketsSent++;
         }
+        if (later != null)
+        {
+            // Retraso al azar, pero nunca antes que el frame anterior (la red no desordena frames enteros).
+            long due = Math.Max(_lastDueMs, _clock.ElapsedMilliseconds + _rnd.Next(0, NetJitterMs + 1));
+            _lastDueMs = due;
+            _delayed.Add((due, later));
+        }
         FramesSent++;
+    }
+
+    private void DelayLoop()
+    {
+        foreach (var (due, packets) in _delayed.GetConsumingEnumerable())
+        {
+            long wait = due - _clock.ElapsedMilliseconds;
+            if (wait > 0) Thread.Sleep((int)wait);
+            foreach (var p in packets) Send(p);
+        }
     }
 
     private void Send(byte[] b)
@@ -212,6 +275,12 @@ public sealed unsafe class SimSender : IDisposable
                     break;
                 case Protocol.Disconnect:
                     Disconnected = true;
+                    break;
+                case Protocol.HelloAck:
+                    Caps = Protocol.ParseJson<HelloAckMessage>(buf.AsSpan(0, n))?.Decode ?? Caps;
+                    break;
+                case Protocol.Limit:
+                    LastLimit = Protocol.ParseJson<LimitMessage>(buf.AsSpan(0, n));
                     break;
             }
         }

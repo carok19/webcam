@@ -17,6 +17,25 @@ public partial class MainWindow : Window
     private readonly DispatcherTimer _timer;
     private bool _loading = true;
     private bool _trayHintShown;
+    private int _ndiRetryTicks;
+    private TimeSpan _lastCpu;
+    private DateTime _lastCpuWall;
+    private double _cpuPct;
+
+    /// <summary>Uso de CPU del proceso del receptor (todos los núcleos = 100 %).</summary>
+    private double PcCpu()
+    {
+        var now = DateTime.UtcNow;
+        var cpu = Process.GetCurrentProcess().TotalProcessorTime;
+        if (_lastCpuWall != default)
+        {
+            double wall = (now - _lastCpuWall).TotalMilliseconds;
+            if (wall > 200) _cpuPct = 100.0 * (cpu - _lastCpu).TotalMilliseconds / (wall * Environment.ProcessorCount);
+        }
+        _lastCpu = cpu;
+        _lastCpuWall = now;
+        return _cpuPct;
+    }
 
     public MainWindow()
     {
@@ -30,6 +49,7 @@ public partial class MainWindow : Window
         UsePhoneMode.IsChecked = s.UsePhoneLatencyMode;
         StartWithWindows.IsChecked = s.StartWithWindows;
         MinimizeToTray.IsChecked = s.MinimizeToTray;
+        AutoLower.IsChecked = s.AutoLowerResolution;
         foreach (ComboBoxItem it in DecoderCombo.Items)
             if ((string)it.Tag == s.Decoder) DecoderCombo.SelectedItem = it;
         if (DecoderCombo.SelectedItem == null) DecoderCombo.SelectedIndex = 0;
@@ -65,6 +85,12 @@ public partial class MainWindow : Window
         int port = _app.Server?.MediaPort ?? _app.Settings.MediaPort;
         StatusText.Text = $"{(NdiLib.IsLoaded ? "✔ " : "✖ ")}{NdiLib.Status}   ·   {(VideoDecoder.FfmpegStatus.StartsWith("FFmpeg ") ? "✔ " : "✖ ")}{VideoDecoder.FfmpegStatus}   ·   " +
                           $"Escuchando en UDP {port}   ·   IP de este PC: {string.Join(", ", ips)}";
+        GpuText.Text = "Decodificación: " + CamaraNdi.Core.Decoding.DecoderProbe.Current.Describe() + $"   ·   CPU del PC (receptor): {PcCpu():F0} %";
+        JitterSlider.IsEnabled = UsePhoneMode.IsChecked != true;
+        JitterText.Text = UsePhoneMode.IsChecked == true ? "lo elige cada celular" : $"{(int)JitterSlider.Value} ms";
+        NdiMissingPanel.Visibility = NdiLib.IsLoaded ? Visibility.Collapsed : Visibility.Visible;
+        // Si falta NDI, volver a buscarlo cada ~10 s (por si lo acaban de instalar).
+        if (!NdiLib.IsLoaded && ++_ndiRetryTicks % 20 == 0) NdiLib.Retry();
         EmptyHint.Visibility = _cards.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
         EmptyHintText.Text = "Abre la app Cámara NDI en el celular (misma red WiFi) y pulsa Transmitir. " +
                              "El celular encuentra este PC solo; si no, escribe en el celular una de estas IP: " +
@@ -94,7 +120,20 @@ public partial class MainWindow : Window
         var s = _app.Settings;
         s.UsePhoneLatencyMode = UsePhoneMode.IsChecked == true;
         s.MinimizeToTray = MinimizeToTray.IsChecked == true;
-        s.Decoder = (DecoderCombo.SelectedItem as ComboBoxItem)?.Tag as string ?? "auto";
+        bool autoLower = AutoLower.IsChecked == true;
+        if (s.AutoLowerResolution && !autoLower)
+        {
+            // "Sólo avisar": los celulares a los que se les había pedido menos resolución vuelven a la máxima.
+            foreach (var session in _app.Server?.Sessions ?? Array.Empty<PhoneSession>()) session.ClearLimit();
+        }
+        s.AutoLowerResolution = autoLower;
+        var decoder = (DecoderCombo.SelectedItem as ComboBoxItem)?.Tag as string ?? "auto";
+        if (decoder != s.Decoder)
+        {
+            s.Decoder = decoder;
+            // Se aplica en el próximo keyframe de cada celular (sin cortar la transmisión).
+            foreach (var session in _app.Server?.Sessions ?? Array.Empty<PhoneSession>()) session.ApplyDecoderSetting();
+        }
         if (s.StartWithWindows != (StartWithWindows.IsChecked == true))
         {
             s.StartWithWindows = StartWithWindows.IsChecked == true;
@@ -109,6 +148,9 @@ public partial class MainWindow : Window
     }
 
     private void OnLatencyClock(object sender, RoutedEventArgs e) => new LatencyClockWindow().Show();
+
+    private void OnDownloadNdi(object sender, RoutedEventArgs e) =>
+        Process.Start(new ProcessStartInfo("https://ndi.video/tools/") { UseShellExecute = true });
 
     private static SessionViewModel? Vm(object sender) => (sender as FrameworkElement)?.Tag as SessionViewModel;
 
@@ -126,6 +168,8 @@ public partial class MainWindow : Window
     }
 
     private void OnKeyframe(object sender, RoutedEventArgs e) => Vm(sender)?.Session.RequestKeyframe();
+
+    private void OnClearLimit(object sender, RoutedEventArgs e) => Vm(sender)?.Session.ClearLimit();
 
     private void OnDisconnect(object sender, RoutedEventArgs e)
     {

@@ -34,6 +34,14 @@ class StreamTransport(
         fun onKeyframeRequested()
         fun onReport(report: Protocol.Report, rttMs: Double, minRttMs: Double)
         fun onRemoteDisconnect(reason: String)
+        /**
+         * Qué decodifica la GPU del PC (alturas máximas; 0 = no puede, -1 = no se sabe) y el límite
+         * de altura que pide el receptor porque no alcanzó (0 = sin límite).
+         */
+        /** maxHeight/maxPixelRate: límite que pide el PC porque no alcanzó a decodificar (0 = sin límite). */
+        fun onReceiverDecodeCaps(hevcGpuMaxHeight: Int, h264GpuMaxHeight: Int, maxHeight: Int, maxPixelRate: Long, gpu: String)
+        /** El PC no alcanza: elegir altura ≤ maxHeight y ancho×alto×fps ≤ maxPixelRate (los dos en 0 = se quitó el límite). */
+        fun onReceiverLimit(maxHeight: Int, maxPixelRate: Long, reason: String)
         /** JSON del HELLO (se pide cada segundo). */
         fun buildHello(): JSONObject
     }
@@ -393,6 +401,17 @@ class StreamTransport(
                 }
                 lastRxMs = now
                 receiverName = json.optString("receiver", receiverName)
+                json.optJSONObject("decode")?.let { d ->
+                    if (d.optBoolean("probed", false)) {
+                        listener.onReceiverDecodeCaps(
+                            d.optInt("hevcGpuMaxHeight", 0), d.optInt("h264GpuMaxHeight", 0),
+                            d.optInt("maxHeight", 0), d.optLong("maxPixelRate", 0), d.optString("gpu", ""),
+                        )
+                    } else {
+                        // El receptor todavía está probando la GPU: sólo el límite (si hay).
+                        listener.onReceiverDecodeCaps(-1, -1, d.optInt("maxHeight", 0), d.optLong("maxPixelRate", 0), "")
+                    }
+                }
                 if (target == null && from != null) target = from
                 from?.address?.hostAddress?.let { lastKnownHost = it }
                 if (!acked || state != State.CONECTADO) {
@@ -425,6 +444,11 @@ class StreamTransport(
                         }
                     }
                 }
+            }
+            Protocol.LIMIT -> {
+                lastRxMs = now
+                val json = runCatching { JSONObject(Protocol.jsonBody(buf, len)) }.getOrNull() ?: return
+                listener.onReceiverLimit(json.optInt("maxHeight", 0), json.optLong("maxPixelRate", 0), json.optString("reason"))
             }
             Protocol.KEYFRAME_REQ -> {
                 lastRxMs = now

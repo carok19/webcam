@@ -5,15 +5,18 @@ using CamaraNdi.Core.Ndi;
 namespace CamaraNdi.Core.Decoding;
 
 /// <summary>
-/// Decodificador H.264/HEVC con FFmpeg. Intenta GPU (D3D11VA, luego DXVA2) y si no, CPU.
-/// Configurado para baja latencia: sin hilos por frame (que añaden 1 frame de retraso por hilo),
-/// AV_CODEC_FLAG_LOW_DELAY, y salida inmediata de cada frame.
+/// Decodificador H.264/HEVC con FFmpeg.
+/// GPU: usa el método que la prueba de arranque (<see cref="DecoderProbe"/>) encontró que funciona
+/// (D3D11VA, NVIDIA CUDA o DXVA2). Si la GPU no puede con el video, NO se queda en CPU con un solo
+/// hilo (eso daba ~1 fps en 4K): avisa con <see cref="HwFellBack"/> y la sesión lo recrea en CPU
+/// con un hilo por núcleo.
 /// </summary>
 public sealed unsafe class VideoDecoder : IDisposable
 {
     private static readonly object InitGate = new();
     private static bool _ffmpegReady;
     private static readonly AVCodecContext_get_format GetFormatCallback = GetHwFormat;
+    private static readonly av_log_set_callback_callback LogCallback = OnFfmpegLog;
 
     private AVCodecContext* _ctx;
     private AVPacket* _pkt;
@@ -23,7 +26,12 @@ public sealed unsafe class VideoDecoder : IDisposable
 
     public VideoCodec Codec { get; }
     public string Backend { get; private set; } = "CPU";
-    public bool IsHardware => _hwDevice != null;
+    /// <summary>Se pidió GPU pero FFmpeg tuvo que seguir en CPU (la GPU no soporta este video).</summary>
+    public bool HwFellBack { get; private set; }
+    /// <summary>Altura del video con el que la GPU no pudo (0 si no pasó).</summary>
+    public int FellBackHeight { get; private set; }
+    public bool IsHardware => _hwDevice != null && !HwFellBack;
+    public int Threads { get; private set; } = 1;
 
     public static string FfmpegStatus { get; private set; } = "FFmpeg no cargado";
 
@@ -38,7 +46,8 @@ public sealed unsafe class VideoDecoder : IDisposable
                 ffmpeg.RootPath = rootPath ?? DefaultRoot();
                 DynamicallyLoadedBindings.Initialize();
                 var ver = ffmpeg.av_version_info();
-                ffmpeg.av_log_set_level(ffmpeg.AV_LOG_ERROR);
+                ffmpeg.av_log_set_level(ffmpeg.AV_LOG_WARNING);
+                ffmpeg.av_log_set_callback(LogCallback);
                 FfmpegStatus = $"FFmpeg {ver}";
                 Log.Info($"{FfmpegStatus} cargado desde {ffmpeg.RootPath}");
                 _ffmpegReady = true;
@@ -64,8 +73,78 @@ public sealed unsafe class VideoDecoder : IDisposable
         return AppContext.BaseDirectory;
     }
 
-    /// <param name="mode">"auto", "gpu" o "cpu"</param>
-    public VideoDecoder(VideoCodec codec, string mode = "auto")
+    // ------------------------------------------------------------------ registro de FFmpeg
+
+    /// <summary>Durante la prueba de GPU se guardan también los mensajes "verbose" (nombre de la GPU).</summary>
+    internal static volatile Action<string>? VerboseSink;
+    private static long _logWindowStart;
+    private static int _logCount;
+    private static string? _lastLogLine;
+
+    private static void OnFfmpegLog(void* avcl, int level, string format, byte* vl)
+    {
+        var sink = VerboseSink;
+        if (level > ffmpeg.AV_LOG_WARNING && (sink == null || level > ffmpeg.AV_LOG_VERBOSE)) return;
+        try
+        {
+            const int size = 1024;
+            var buf = stackalloc byte[size];
+            int prefix = 1;
+            ffmpeg.av_log_format_line2(avcl, level, format, vl, buf, size, &prefix);
+            var line = Marshal.PtrToStringUTF8((IntPtr)buf)?.Trim();
+            if (string.IsNullOrEmpty(line)) return;
+            if (sink != null && level > ffmpeg.AV_LOG_WARNING) { sink(line); return; }
+            // Sin inundar el registro: máximo 30 líneas cada 10 s y sin repetidas.
+            long now = Clock.NowMs;
+            lock (InitGate)
+            {
+                if (now - _logWindowStart > 10_000) { _logWindowStart = now; _logCount = 0; }
+                if (line == _lastLogLine || ++_logCount > 30) return;
+                _lastLogLine = line;
+            }
+            sink?.Invoke(line);
+            if (level <= ffmpeg.AV_LOG_ERROR) Log.Warn("FFmpeg: " + line);
+            else Log.Info("FFmpeg: " + line);
+        }
+        catch
+        {
+            // Nunca dejar que un error de registro tumbe el decodificador.
+        }
+    }
+
+    // ------------------------------------------------------------------ creación
+
+    /// <summary>Métodos de GPU a probar en esta plataforma, en orden de preferencia.</summary>
+    public static IReadOnlyList<string> PlatformHwTypes() =>
+        OperatingSystem.IsWindows() ? new[] { "d3d11va", "cuda", "dxva2" }
+        : OperatingSystem.IsLinux() ? new[] { "vaapi", "cuda" }
+        : new[] { "videotoolbox" };
+
+    private static AVHWDeviceType ToDeviceType(string name) => name switch
+    {
+        "d3d11va" => AVHWDeviceType.AV_HWDEVICE_TYPE_D3D11VA,
+        "dxva2" => AVHWDeviceType.AV_HWDEVICE_TYPE_DXVA2,
+        "cuda" => AVHWDeviceType.AV_HWDEVICE_TYPE_CUDA,
+        "vaapi" => AVHWDeviceType.AV_HWDEVICE_TYPE_VAAPI,
+        "videotoolbox" => AVHWDeviceType.AV_HWDEVICE_TYPE_VIDEOTOOLBOX,
+        _ => AVHWDeviceType.AV_HWDEVICE_TYPE_NONE,
+    };
+
+    private static string Label(string hw) => hw switch
+    {
+        "d3d11va" => "GPU (D3D11VA)",
+        "dxva2" => "GPU (DXVA2)",
+        "cuda" => "GPU (NVIDIA)",
+        "vaapi" => "GPU (VAAPI)",
+        _ => "GPU",
+    };
+
+    /// <param name="hwTypes">Métodos de GPU a intentar (vacío = sólo CPU).</param>
+    /// <param name="lowLatency">En los modos rápidos se usan menos hilos de CPU (cada hilo por frame suma un frame de retraso).</param>
+    public VideoDecoder(VideoCodec codec, IEnumerable<string> hwTypes, bool lowLatency) : this(codec, hwTypes, lowLatency, null) { }
+
+    /// <param name="forceThreads">Sólo para pruebas: fijar el número de hilos de CPU.</param>
+    internal VideoDecoder(VideoCodec codec, IEnumerable<string> hwTypes, bool lowLatency, int? forceThreads)
     {
         if (!EnsureFfmpeg()) throw new InvalidOperationException(FfmpegStatus);
         Codec = codec;
@@ -74,20 +153,43 @@ public sealed unsafe class VideoDecoder : IDisposable
         if (dec == null) throw new InvalidOperationException($"FFmpeg no tiene decodificador para {codec}");
 
         _ctx = ffmpeg.avcodec_alloc_context3(dec);
-        _ctx->flags |= ffmpeg.AV_CODEC_FLAG_LOW_DELAY;
 
-        if (mode != "cpu") TryHardware();
-
-        if (_hwDevice == null)
+        foreach (var hw in hwTypes)
         {
-            // CPU: hilos por "slice" (no añaden retraso). Hilos por frame están prohibidos aquí.
-            _ctx->thread_type = ffmpeg.FF_THREAD_SLICE;
-            _ctx->thread_count = 0;
-            Backend = "CPU";
+            var t = ToDeviceType(hw);
+            if (t == AVHWDeviceType.AV_HWDEVICE_TYPE_NONE) continue;
+            AVBufferRef* dev = null;
+            // D3D11VA: pedir el adaptador 0 (el mismo que usa por defecto) hace que FFmpeg registre
+            // "Using device …(nombre)", y así se puede mostrar qué GPU tiene el PC.
+            string? device = t == AVHWDeviceType.AV_HWDEVICE_TYPE_D3D11VA ? "0" : null;
+            if (ffmpeg.av_hwdevice_ctx_create(&dev, t, device, null, 0) < 0 || dev == null) continue;
+            _hwDevice = dev;
+            _ctx->hw_device_ctx = ffmpeg.av_buffer_ref(dev);
+            _ctx->get_format = (AVCodecContext_get_format_func)GetFormatCallback;
+            // Algunos codificadores de celular marcan un nivel/perfil más alto del que usan de verdad:
+            // no rechazar la GPU por eso (si de verdad no puede, igual cae a CPU y se recrea).
+            _ctx->hwaccel_flags |= ffmpeg.AV_HWACCEL_FLAG_IGNORE_LEVEL | ffmpeg.AV_HWACCEL_FLAG_ALLOW_PROFILE_MISMATCH;
+            Backend = Label(hw);
+            break;
+        }
+
+        if (_hwDevice != null)
+        {
+            // GPU: un hilo y salida inmediata.
+            _ctx->flags |= ffmpeg.AV_CODEC_FLAG_LOW_DELAY;
+            _ctx->thread_count = 1;
+            Threads = 1;
         }
         else
         {
-            _ctx->thread_count = 1;
+            // CPU: los celulares mandan 1 "slice" por imagen, así que sólo los hilos por frame
+            // reparten el trabajo entre núcleos. Cada hilo suma ~1 frame de retraso.
+            int cores = Math.Max(1, Environment.ProcessorCount);
+            Threads = forceThreads ?? Math.Clamp(lowLatency ? Math.Min(cores, 4) : cores, 1, 16);
+            _ctx->thread_count = Threads;
+            _ctx->thread_type = Threads > 1 ? ffmpeg.FF_THREAD_FRAME | ffmpeg.FF_THREAD_SLICE : ffmpeg.FF_THREAD_SLICE;
+            if (Threads == 1) _ctx->flags |= ffmpeg.AV_CODEC_FLAG_LOW_DELAY;
+            Backend = Threads > 1 ? $"CPU ({Threads} hilos)" : "CPU";
         }
 
         int r = ffmpeg.avcodec_open2(_ctx, dec, null);
@@ -102,35 +204,11 @@ public sealed unsafe class VideoDecoder : IDisposable
         Log.Info($"Decodificador {codec} abierto ({Backend})");
     }
 
-    private void TryHardware()
-    {
-        var types = OperatingSystem.IsWindows()
-            ? new[] { AVHWDeviceType.AV_HWDEVICE_TYPE_D3D11VA, AVHWDeviceType.AV_HWDEVICE_TYPE_DXVA2 }
-            : OperatingSystem.IsLinux()
-                ? new[] { AVHWDeviceType.AV_HWDEVICE_TYPE_VAAPI }
-                : new[] { AVHWDeviceType.AV_HWDEVICE_TYPE_VIDEOTOOLBOX };
-        foreach (var t in types)
-        {
-            AVBufferRef* dev = null;
-            if (ffmpeg.av_hwdevice_ctx_create(&dev, t, null, null, 0) < 0 || dev == null) continue;
-            _hwDevice = dev;
-            _ctx->hw_device_ctx = ffmpeg.av_buffer_ref(dev);
-            _ctx->get_format = (AVCodecContext_get_format_func)GetFormatCallback;
-            Backend = t switch
-            {
-                AVHWDeviceType.AV_HWDEVICE_TYPE_D3D11VA => "GPU (D3D11VA)",
-                AVHWDeviceType.AV_HWDEVICE_TYPE_DXVA2 => "GPU (DXVA2)",
-                AVHWDeviceType.AV_HWDEVICE_TYPE_VAAPI => "GPU (VAAPI)",
-                _ => "GPU",
-            };
-            return;
-        }
-    }
-
     private static AVPixelFormat HwPixFmt(AVHWDeviceType t) => t switch
     {
         AVHWDeviceType.AV_HWDEVICE_TYPE_D3D11VA => AVPixelFormat.AV_PIX_FMT_D3D11,
         AVHWDeviceType.AV_HWDEVICE_TYPE_DXVA2 => AVPixelFormat.AV_PIX_FMT_DXVA2_VLD,
+        AVHWDeviceType.AV_HWDEVICE_TYPE_CUDA => AVPixelFormat.AV_PIX_FMT_CUDA,
         AVHWDeviceType.AV_HWDEVICE_TYPE_VAAPI => AVPixelFormat.AV_PIX_FMT_VAAPI,
         AVHWDeviceType.AV_HWDEVICE_TYPE_VIDEOTOOLBOX => AVPixelFormat.AV_PIX_FMT_VIDEOTOOLBOX,
         _ => AVPixelFormat.AV_PIX_FMT_NONE,
@@ -151,18 +229,21 @@ public sealed unsafe class VideoDecoder : IDisposable
                 if (desc != null && (desc->flags & ffmpeg.AV_PIX_FMT_FLAG_HWACCEL) == 0) firstSw = *p;
             }
         }
-        // La GPU no soporta este perfil/resolución: FFmpeg sigue en CPU.
+        // La GPU no soporta este perfil/resolución: FFmpeg sigue en CPU (y avisamos con HwFellBack).
         return firstSw;
     }
+
+    // ------------------------------------------------------------------ decodificación
 
     public enum Result { Ok, NoPicture, Error }
 
     /// <summary>
-    /// Decodifica un frame (Annex-B) y copia la imagen a <paramref name="output"/> (NV12 o I420).
+    /// Decodifica un frame (Annex-B). Las imágenes que salgan (con hilos por frame salen con unos
+    /// frames de retraso, y a veces dos juntas) se agregan a <paramref name="outputs"/> en NV12 o I420.
     /// </summary>
-    public Result Decode(byte[] data, int length, long ptsUs, Func<int, VideoBuffer> rent, out VideoBuffer? output)
+    public Result Decode(byte[] data, int length, long ptsUs, Func<int, VideoBuffer> rent, List<VideoBuffer> outputs)
     {
-        output = null;
+        var result = Result.NoPicture;
         fixed (byte* p = data)
         {
             _pkt->data = p;
@@ -170,11 +251,27 @@ public sealed unsafe class VideoDecoder : IDisposable
             _pkt->pts = ptsUs;
             _pkt->dts = ptsUs;
             int r = ffmpeg.avcodec_send_packet(_ctx, _pkt);
+            // Si el decodificador está lleno, primero hay que sacarle imágenes y luego reenviar:
+            // nunca se descarta un paquete (eso rompería las referencias del video).
+            int guard = 0;
+            while (r == ffmpeg.AVERROR(ffmpeg.EAGAIN) && guard++ < 64)
+            {
+                var rr = Receive(rent, outputs);
+                if (rr == Result.Error) { result = Result.Error; break; }
+                if (rr == Result.Ok) result = Result.Ok;
+                r = ffmpeg.avcodec_send_packet(_ctx, _pkt);
+            }
             _pkt->data = null;
             _pkt->size = 0;
             if (r < 0 && r != ffmpeg.AVERROR(ffmpeg.EAGAIN)) return Result.Error;
         }
+        var res = Receive(rent, outputs);
+        if (res == Result.Error) return Result.Error;
+        return res == Result.Ok || result == Result.Ok ? Result.Ok : Result.NoPicture;
+    }
 
+    private Result Receive(Func<int, VideoBuffer> rent, List<VideoBuffer> outputs)
+    {
         var result = Result.NoPicture;
         while (true)
         {
@@ -194,10 +291,12 @@ public sealed unsafe class VideoDecoder : IDisposable
                 }
                 src = _swFrame;
             }
-            else if (_hwDevice != null && !Backend.StartsWith("CPU"))
+            else if (_hwDevice != null && !HwFellBack)
             {
-                Backend = "CPU (la GPU no soporta este perfil)";
-                Log.Warn(Backend);
+                HwFellBack = true;
+                FellBackHeight = _frame->height;
+                Backend = "CPU (la GPU no soporta este video)";
+                Log.Warn($"{Codec} {_frame->width}x{_frame->height}: la GPU no lo pudo decodificar");
             }
             bool corrupt = (_frame->flags & ffmpeg.AV_FRAME_FLAG_CORRUPT) != 0 || _frame->decode_error_flags != 0;
             if (corrupt)
@@ -205,20 +304,49 @@ public sealed unsafe class VideoDecoder : IDisposable
                 ffmpeg.av_frame_unref(_frame);
                 return Result.Error;
             }
-            // Si llegan varios (no debería con LOW_DELAY), nos quedamos con el último.
             var buf = Copy(src, rent);
             if (buf != null)
             {
                 buf.SignaledRange = (int)_frame->color_range;
                 if ((AVPixelFormat)_frame->format == AVPixelFormat.AV_PIX_FMT_YUVJ420P) buf.SignaledRange = (int)AVColorRange.AVCOL_RANGE_JPEG;
                 buf.SignaledMatrix = (int)_frame->colorspace;
+                buf.PtsUs = _frame->pts;
             }
             ffmpeg.av_frame_unref(_frame);
             if (buf == null) return Result.Error;
-            output = buf;
+            outputs.Add(buf);
             result = Result.Ok;
         }
         return result;
+    }
+
+    /// <summary>
+    /// Prueba de arranque: ¿este método de GPU decodifica esta muestra? Devuelve true sólo si salió
+    /// una imagen decodificada de verdad por la GPU.
+    /// </summary>
+    public static bool ProbeHardware(VideoCodec codec, string hwType, byte[] sample)
+    {
+        VideoDecoder? d = null;
+        try
+        {
+            d = new VideoDecoder(codec, new[] { hwType }, lowLatency: true);
+            if (d._hwDevice == null) return false;
+            var outputs = new List<VideoBuffer>();
+            d.Decode(sample, sample.Length, 0, size => new VideoBuffer(size), outputs);
+            // vaciar lo que quede dentro del decodificador
+            ffmpeg.avcodec_send_packet(d._ctx, null);
+            d.Receive(size => new VideoBuffer(size), outputs);
+            return outputs.Count > 0 && !d.HwFellBack;
+        }
+        catch (Exception ex)
+        {
+            Log.Info($"Prueba {codec} con {hwType}: {ex.Message}");
+            return false;
+        }
+        finally
+        {
+            d?.Dispose();
+        }
     }
 
     private static VideoBuffer? Copy(AVFrame* f, Func<int, VideoBuffer> rent)

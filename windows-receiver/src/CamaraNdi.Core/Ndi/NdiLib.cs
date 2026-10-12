@@ -60,6 +60,61 @@ public static unsafe class NdiLib
     public static string Status { get; private set; } = "NDI no cargado";
     public static string? LoadedFrom { get; private set; }
 
+    /// <summary>Volver a buscar NDI (p. ej. el usuario lo acaba de instalar). No hace nada si ya está cargado.</summary>
+    public static bool Retry()
+    {
+        lock (Gate)
+        {
+            if (IsLoaded) return true;
+            _attempted = false;
+        }
+        return EnsureLoaded();
+    }
+
+    private static IEnumerable<string> RegistryEnv(string name)
+    {
+        var list = new List<string>();
+        if (!OperatingSystem.IsWindows()) return list;
+        try
+        {
+            using var hklm = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Control\Session Manager\Environment");
+            if (hklm?.GetValue(name) is string a && a.Length > 0) list.Add(Environment.ExpandEnvironmentVariables(a));
+            using var hkcu = Microsoft.Win32.Registry.CurrentUser.OpenSubKey("Environment");
+            if (hkcu?.GetValue(name) is string b && b.Length > 0) list.Add(Environment.ExpandEnvironmentVariables(b));
+        }
+        catch { }
+        return list;
+    }
+
+    private static IEnumerable<string> FindFile(string root, string name, int depth)
+    {
+        var found = new List<string>();
+        try
+        {
+            if (!System.IO.Directory.Exists(root)) return found;
+            var f = Path.Combine(root, name);
+            if (File.Exists(f)) found.Add(f);
+            if (depth > 0)
+                foreach (var d in System.IO.Directory.GetDirectories(root))
+                    found.AddRange(FindFile(d, name, depth - 1));
+        }
+        catch { }
+        return found;
+    }
+
+    private static readonly HashSet<string> LoggedOnce = new();
+
+    /// <summary>
+    /// Si falta NDI se reintenta cada ~10 s: cada aviso se registra una sola vez, para no tapar el
+    /// registro (y que la ventana de registro no salte al final todo el tiempo).
+    /// </summary>
+    private static void LogOnce(string message, bool error = false, Exception? ex = null)
+    {
+        if (!LoggedOnce.Add(message)) return;
+        if (error) Log.Error(message, ex);
+        else Log.Warn(message);
+    }
+
     public static bool EnsureLoaded()
     {
         lock (Gate)
@@ -80,12 +135,12 @@ public static unsafe class NdiLib
                     LoadedFrom = path;
                     break;
                 }
-                catch (Exception ex) { Log.Warn($"No se pudo cargar {path}: {ex.Message}"); }
+                catch (Exception ex) { LogOnce($"No se pudo cargar {path}: {ex.Message}"); }
             }
             if (_lib == IntPtr.Zero)
             {
                 Status = "No se encontró NDI Runtime. Instala \"NDI Tools\" o \"NDI Runtime\" desde https://ndi.video/tools/ (DistroAV también lo instala).";
-                Log.Warn(Status);
+                LogOnce(Status);
                 return false;
             }
             try
@@ -101,7 +156,7 @@ public static unsafe class NdiLib
                 if (Initialize() == 0)
                 {
                     Status = "NDI no pudo iniciar (CPU sin soporte SSE4.2?)";
-                    Log.Error(Status);
+                    LogOnce(Status, error: true);
                     return false;
                 }
                 var v = Marshal.PtrToStringUTF8((IntPtr)Version()) ?? "?";
@@ -113,7 +168,7 @@ public static unsafe class NdiLib
             catch (Exception ex)
             {
                 Status = "La librería NDI encontrada no es compatible: " + ex.Message;
-                Log.Error(Status, ex);
+                LogOnce(Status, error: true, ex);
                 return false;
             }
         }
@@ -139,6 +194,10 @@ public static unsafe class NdiLib
         {
             var dir = Environment.GetEnvironmentVariable(env);
             if (!string.IsNullOrEmpty(dir)) yield return Path.Combine(dir, name);
+            // Si NDI se instaló con el receptor (o Windows) ya abierto, la variable todavía no llega
+            // a este proceso: se lee directo del registro.
+            if (OperatingSystem.IsWindows())
+                foreach (var d in RegistryEnv(env)) yield return Path.Combine(d, name);
         }
         if (OperatingSystem.IsWindows())
         {
@@ -147,6 +206,11 @@ public static unsafe class NdiLib
             yield return Path.Combine(pf, "NDI", "NDI 6 Tools", "Runtime", name);
             yield return Path.Combine(pf, "NDI", "NDI 5 Runtime", "v5", name);
             yield return Path.Combine(pf, "NDI", "NDI 6 SDK", "Bin", "x64", name);
+            yield return Path.Combine(pf, "NDI", "NDI 5 SDK", "Bin", "x64", name);
+            yield return Path.Combine(pf, "NewTek", "NDI 4 Runtime", "v4", name);
+            // Último recurso: buscar en las carpetas de NDI / NewTek.
+            foreach (var root in new[] { Path.Combine(pf, "NDI"), Path.Combine(pf, "NewTek") })
+                foreach (var f in FindFile(root, name, 4)) yield return f;
         }
         else if (OperatingSystem.IsLinux())
         {

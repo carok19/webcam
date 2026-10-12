@@ -157,6 +157,30 @@ Nada de esto es un "filtro": son maneras de no perder información que la cámar
 | **Pérdidas en el WiFi** | Cada frame perdido obliga a pedir un keyframe, y durante un momento la imagen se ve más pobre. | En calidad el receptor espera hasta 0,3–0,8 s y vuelve a pedir los paquetes perdidos: con 6 % de pérdida simulada, **0 frames perdidos** (ver sección 7). |
 | **OBS** | "Bandwidth: Lowest" en la fuente NDI, o un bitrate de transmisión bajo en YouTube/Facebook. | Fuente NDI en **Highest**. Para transmitir: 1080p30 a **6000 kbps**, keyframe 2 s. Con x264 agrega en *Opciones x264*: `aq-mode=3` (cuida las escenas oscuras). Con NVENC: preset **P6 / Calidad**, *Tuning: High Quality*, *Multipass: Two passes (quarter)*, *Psycho Visual Tuning* activado. |
 
+### 4K con varios celulares (lo que necesita el PC)
+
+La app manda **la máxima resolución del celular con sus fps máximos** (en el A52s, 4K a 30 fps). Que eso llegue
+fluido depende del PC que recibe:
+
+* **La tarjeta gráfica (GPU) es lo que decide.** Al abrir, el receptor prueba qué decodifica la GPU y lo muestra arriba:
+  `Decodificación: <GPU>: H.265 4K · H.264 4K`. Los celulares reciben ese dato y eligen solos el códec que la GPU
+  decodifica (por ejemplo H.264 si la GPU no tiene H.265 en 4K).
+* Para **2–3 celulares en 4K** hace falta una GPU con decodificación H.265 4K: en general NVIDIA GTX 1050 o más nueva,
+  Intel de 7.ª generación o más nueva (gráficos HD 630 / UHD), AMD RX 400 o más nueva. Cada fuente 4K además pasa por
+  la compresión de NDI, que usa CPU: conviene un procesador de 6 núcleos o más si OBS corre en el mismo PC.
+* **Sin GPU compatible**, el receptor decodifica con **todos los núcleos** de la CPU. Un 4K puede andar bien;
+  2–3 a la vez, difícilmente.
+* **Si el PC no alcanza**, el receptor nunca deja que el retraso crezca (salta frames viejos), lo avisa en la tarjeta
+  del celular y —si está marcada la casilla **"Bajar resolución si este PC no alcanza"**— le pide al celular un
+  escalón menos de píxeles por segundo para que siga fluido: 4K30 → 1440p30 (o 1080p60), 1440p30 → 1080p30,
+  1080p30 → 720p30. Nunca sube los fps a cambio (1440p30 no pasa a 1080p60, que pesa más).
+  * Las pérdidas del WiFi **no** cuentan como "PC lento": sólo se baja si de verdad no alcanza a decodificar.
+  * Si fue algo pasajero (por ejemplo, Windows actualizando), pulsa **"Quitar límite"** en la tarjeta: el celular
+    vuelve a su máxima resolución. También se quita al elegir una resolución a mano en el celular, al reiniciar la
+    app del celular o al desmarcar la casilla.
+  * Si prefieres mantener 4K aunque vaya a saltos, desmarca la casilla (sólo avisa).
+* Retraso esperado: modo **Calidad** ≈ 0,4–0,6 s en total; **Máxima calidad** ≈ 1 s.
+
 ### Zoom sin perder calidad
 * **Haz el zoom en el celular, no en OBS.** En el celular el recorte se hace sobre el sensor completo (12–64 MP),
   así que hasta cierto punto no se pierde nada; en OBS sólo se agranda un video que ya llegó a 1080p.
@@ -261,6 +285,11 @@ celulares**. Lo que sí se probó de verdad:
 | Compilación del APK (contra APIs de Android 14) y del .exe (win-x64) | OK |
 | Video en **rango completo** (como muchos Android), señalizado y sin señalizar | El receptor entrega negro ≈16 y blanco ≈235 (antes: 0 y 255 → negros aplastados en OBS). Conversión: ~1 ms por frame 1080p |
 | 6 % de pérdida en ambos sentidos, modo **mínima** vs **máxima calidad** | Mínima: 13 frames perdidos en ~5 s (≈27 fps). Máxima: **0 frames perdidos, 30 fps**, ~0,3 s más de retraso |
+| 4K H.265 por CPU (máquina de pruebas de 4 núcleos) | Versión 1.0.5: **1 hilo → 11,5 fps**. Ahora: **todos los núcleos → 28–56 fps** |
+| "PC lento" simulado (decodifica sólo ~14 fps de un 1080p30) | Antes: la cola crecía hasta 240 frames (**~8–9 s de retraso**, 1 fps). Ahora: retraso máx. **~1 s**, aviso en la tarjeta y pedido de menos píxeles por segundo (1080p30 → 720p30). "Quitar límite" lo deshace y el aviso se borra cuando el PC vuelve a ir a la par |
+| 20 % de pérdida en ambos sentidos (720p40, modo mínima), PC que sí alcanza | Versión anterior: confundía la pérdida con "PC lento" y **pedía bajar la resolución**. Ahora: no la baja |
+| Decodificación por CPU con 4 hilos + jitter de red de 0–40 ms (modo Calidad) | Antes: salida a tirones (desviación 16 ms, 27 saltos de más de 50 ms). Ahora: **desviación 2,6 ms, ningún salto** |
+| "Detener" 1,2 s y volver a "Transmitir" en el celular | Antes: salían al aire imágenes de antes de la pausa (de hace 1,3 s). Ahora: la imagen más vieja tiene ≈0,2 s |
 
 No se pudo probar aquí: cámara real, codificador por hardware, NDI en Windows, D3D11VA y la interfaz WPF/Android en pantalla.
 
@@ -286,6 +315,8 @@ No se pudo probar aquí: cámara real, codificador por hardware, NDI en Windows,
 | El celular dice "Buscando receptor…" | Firewall (`abrir-firewall.bat`), red privada, mismo WiFi, sin aislamiento de clientes. Escribe la IP que muestra el receptor. |
 | "✖ No se encontró NDI Runtime" en el receptor | Instala NDI Tools y reinicia el receptor. |
 | Tirones | Modo "Calidad" o "Máxima calidad" (buffer grande), 5 GHz, PC por cable. Mira "Pérdida" en la tarjeta. |
+| El celular quedó en menos resolución ("Este PC no alcanzaba …") | El PC no alcanzó a decodificar. Si fue algo pasajero, pulsa **"Quitar límite"** en la tarjeta (o elige la resolución a mano en el celular). Si vuelve a pasar, el PC no da para esa resolución con tantos celulares: mira la línea "Decodificación" (GPU) arriba. |
+| Salida a 1 fps y varios segundos de retraso | Era la versión 1.0.5 con un 4K que la GPU no decodificaba (quedaba en CPU con un solo hilo). Desde la 1.0.6 se usan todos los núcleos, se prueba la GPU al abrir y el retraso nunca se acumula. Mira la línea "Decodificación" arriba y el aviso naranja en la tarjeta. |
 | Negros aplastados / ropa oscura como una mancha | Ver sección 3b: mira la línea **Color** de la tarjeta, prueba "Curva neutral", "Exposición según el centro", EV +0,3 y revisa la fuente NDI de OBS (Highest, Partial, BT.709). |
 | Negros grises / imagen lavada | En OBS la fuente NDI debe estar en "YUV Range: Partial". Si ya lo está, en el receptor pon "Rango de entrada: Limitado". |
 | Se corta con la pantalla apagada | Permiso "sin restricciones de batería" (Ajustes de la app) y los pasos de Samsung/Infinix de arriba. |

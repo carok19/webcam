@@ -173,16 +173,25 @@ class VideoEncoder(
     @Volatile var timestampRealtime = true
 
     private fun measureLatency(ptsUs: Long) {
-        val nowUs = if (timestampRealtime) SystemClock.elapsedRealtimeNanos() / 1000 else System.nanoTime() / 1000
-        val ms = (nowUs - ptsUs) / 1000.0
-        if (ms in 0.0..1500.0) avgEncodeMs = if (avgEncodeMs == 0.0) ms else avgEncodeMs * 0.9 + ms * 0.1
+        val ms = ageMs(ptsUs, 1500.0)
+        if (ms >= 0) avgEncodeMs = if (avgEncodeMs == 0.0) ms else avgEncodeMs * 0.9 + ms * 0.1
     }
 
-    /** Edad (ms) de un frame según su pts; -1 si no se puede saber. */
-    fun ageMs(ptsUs: Long): Double {
-        val nowUs = if (timestampRealtime) SystemClock.elapsedRealtimeNanos() / 1000 else System.nanoTime() / 1000
-        val ms = (nowUs - ptsUs) / 1000.0
-        return if (ms in 0.0..10_000.0) ms else -1.0
+    /**
+     * Edad (ms) de un frame según su pts; -1 si no se puede saber.
+     * Algunas cámaras declaran una base de tiempo y usan otra (p. ej. "desconocida" en Samsung):
+     * se prueban los dos relojes del sistema y se usa el que da un valor razonable.
+     */
+    fun ageMs(ptsUs: Long, maxMs: Double = 10_000.0): Double {
+        val boot = (SystemClock.elapsedRealtimeNanos() / 1000 - ptsUs) / 1000.0
+        val mono = (System.nanoTime() / 1000 - ptsUs) / 1000.0
+        val first = if (timestampRealtime) boot else mono
+        val second = if (timestampRealtime) mono else boot
+        return when {
+            first in 0.0..maxMs -> first
+            second in 0.0..maxMs -> second
+            else -> -1.0
+        }
     }
 
     fun setBitrate(bps: Int) {

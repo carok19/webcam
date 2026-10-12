@@ -31,6 +31,8 @@ public static class Protocol
     public const byte Report = 0x85;
     public const byte Disconnect = 0x86;
     public const byte DiscoverReply = 0x87;
+    /// <summary>El PC no alcanza a decodificar: pide al celular una altura máxima (JSON LimitMessage).</summary>
+    public const byte Limit = 0x88;
 
     public const byte FlagKeyframe = 0x01;
     public const byte FlagRetransmit = 0x02;
@@ -244,6 +246,33 @@ public sealed class HelloAckMessage
     public string NdiName { get; set; } = "";
     public int JitterMs { get; set; }
     public bool Accepted { get; set; } = true;
+    public string Reason { get; set; } = "";
+    /// <summary>Qué puede decodificar este PC (para que el celular elija códec/resolución).</summary>
+    public DecodeCapsMessage? Decode { get; set; }
+}
+
+public sealed class DecodeCapsMessage
+{
+    /// <summary>false mientras el receptor todavía está probando la GPU.</summary>
+    public bool Probed { get; set; }
+    /// <summary>Altura máxima que la GPU decodifica en H.265 (0 = no puede).</summary>
+    public int HevcGpuMaxHeight { get; set; }
+    public int H264GpuMaxHeight { get; set; }
+    /// <summary>Límite pedido porque el PC no alcanzó (0 = sin límite).</summary>
+    public int MaxHeight { get; set; }
+    /// <summary>Píxeles por segundo máximos (ancho × alto × fps) que este PC alcanzó a decodificar (0 = sin límite).</summary>
+    public long MaxPixelRate { get; set; }
+    public string Gpu { get; set; } = "";
+}
+
+/// <summary>
+/// El PC no alcanza a decodificar lo que llega: el celular debe elegir un modo con
+/// altura ≤ MaxHeight y ancho × alto × fps ≤ MaxPixelRate. Los dos en 0 = se quita el límite.
+/// </summary>
+public sealed class LimitMessage
+{
+    public int MaxHeight { get; set; }
+    public long MaxPixelRate { get; set; }
     public string Reason { get; set; } = "";
 }
 

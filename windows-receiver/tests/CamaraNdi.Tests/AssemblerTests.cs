@@ -80,6 +80,28 @@ public class AssemblerTests
     }
 
     [Fact]
+    public void BacklogSkipsAreNotCountedAsNetworkLoss()
+    {
+        var a = new FrameAssembler { JitterMs = 50 };
+        a.OnPacket(H(0, 0, 0, 1, key: true), P(1), 0);
+        Assert.NotNull(a.NextFrame(0));
+        for (uint i = 1; i <= 5; i++) a.OnPacket(H(i, i, 0, 1), P(2), 1); // se acumulan: el PC no alcanza
+        Assert.Equal(5, a.DropBacklog());
+        a.OnPacket(H(6, 6, 0, 1), P(3), 2); // P mientras se espera el keyframe: también es culpa del PC
+        Assert.Null(a.NextFrame(2));
+        Assert.Equal(6, a.FramesSkippedSlowPc);
+        Assert.Equal(0, a.FramesDropped);
+        a.OnPacket(H(7, 7, 0, 1, key: true), P(4), 3);
+        Assert.Equal(7u, a.NextFrame(3)!.FrameId);
+        // Ahora sí una pérdida de red: el frame 8 nunca se completa y el 9 (P) queda sin referencia.
+        a.OnPacket(H(8, 8, 0, 2), P(5), 10);
+        a.OnPacket(H(10, 9, 0, 1), P(6), 11);
+        Assert.Null(a.NextFrame(61));
+        Assert.Equal(2, a.FramesDropped);
+        Assert.Equal(6, a.FramesSkippedSlowPc);
+    }
+
+    [Fact]
     public void JumpsDirectlyToCompleteKeyframeWhenBroken()
     {
         var a = new FrameAssembler { JitterMs = 1000 };

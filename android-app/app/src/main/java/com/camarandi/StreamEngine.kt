@@ -136,6 +136,24 @@ class StreamEngine(private val context: Context) :
     private var fpsWindowStartMs = 0L
     private var slowTicks = 0
     @Volatile private var hqProcessingDisabled = false
+
+    // Lo que decodifica el PC (del HELLO_ACK). -1 = no se sabe todavía.
+    @Volatile private var pcHevcGpu = settings.lastHevcGpuMaxHeight
+    @Volatile private var pcH264Gpu = settings.lastH264GpuMaxHeight
+    /** Límite que pidió el receptor porque no alcanzó a decodificar. */
+    private data class PcLimit(val maxHeight: Int = 0, val maxPixelRate: Long = 0) {
+        val active: Boolean get() = maxHeight > 0 || maxPixelRate > 0
+        fun allows(p: Preset): Boolean =
+            (maxHeight <= 0 || p.height <= maxHeight) && (maxPixelRate <= 0 || p.pixelRate <= maxPixelRate)
+    }
+    @Volatile private var pcLimit = PcLimit()
+    /**
+     * Último límite visto en un HELLO_ACK. El ACK se repite cada segundo: el límite sólo se aplica
+     * cuando cambia. Así, si el usuario elige otra resolución a mano, no se le vuelve a imponer.
+     */
+    private var lastAckLimit = PcLimit()
+    private var lastPresetId = settings.presetId
+    @Volatile private var pcGpuName = ""
     @Volatile var measuredFps = 0.0
         private set
 
@@ -323,6 +341,15 @@ class StreamEngine(private val context: Context) :
     fun applySettings() = handler.post {
         applyImagePrefs()
         val c = camera ?: return@post
+        if (settings.presetId != lastPresetId) {
+            lastPresetId = settings.presetId
+            // Resolución elegida a mano: manda sobre el límite anterior del PC. Si el PC sigue sin
+            // alcanzar, volverá a pedir menos con un mensaje nuevo.
+            if (pcLimit.active) {
+                pcLimit = PcLimit()
+                post("Se usa la resolución elegida (el PC había pedido menos; si no alcanza, lo volverá a pedir)", false)
+            }
+        }
         refreshSupport()
         val key = encoderKey()
         val changed = key != lastEncoderKey
@@ -461,8 +488,16 @@ class StreamEngine(private val context: Context) :
 
     private fun pickPreset(c: CameraInfo): Preset? {
         val wanted = Preset.byId(settings.presetId)
-        val ok = supports.filter { it.ok }.map { it.preset }
+        val limit = pcLimit
+        val supported = supports.filter { it.ok }.map { it.preset }
+        // Con límite del PC: sólo modos con menos píxeles por segundo (1440p30 → 1080p30, no 1080p60,
+        // que pesa más). Si ninguno entra, el más liviano que tenga el celular.
+        val ok = supported.filter { limit.allows(it) }.ifEmpty { listOfNotNull(supported.minByOrNull { it.pixelRate }) }
         if (wanted != null && wanted in ok) return wanted
+        if (wanted != null && limit.active && wanted in supported) {
+            // El celular puede, pero el PC no alcanzó a decodificarlo.
+            return bestAuto(ok)
+        }
         if (wanted != null) {
             // El preset guardado no sirve en esta cámara: el mejor que no lo supere.
             val alt = ok.firstOrNull { it.pixelRate <= wanted.pixelRate } ?: ok.firstOrNull()
@@ -473,11 +508,34 @@ class StreamEngine(private val context: Context) :
     }
 
     /**
-     * La mejor resolución que sostiene el celular. En los modos de calidad se prefieren 30 fps:
-     * con poca luz (iglesia), 60 fps deja la mitad de luz por frame y las sombras se llenan de ruido.
+     * Automático: la MAYOR resolución que sostiene el celular, con los fps máximos que da en esa
+     * resolución (la lista está ordenada así: 4K30, 1440p30, 1080p60, 1080p30…).
      */
-    private fun bestAuto(ok: List<Preset>): Preset? =
-        if (settings.isQualityMode) ok.firstOrNull { it.fps <= 30 } ?: ok.firstOrNull() else ok.firstOrNull()
+    private fun bestAuto(ok: List<Preset>): Preset? = ok.firstOrNull()
+
+    /**
+     * Códec: en automático se elige el que la GPU del PC decodifica a esta resolución (H.265 primero).
+     * Si la GPU del PC no puede con ninguno, H.264: la CPU lo decodifica bastante más rápido que H.265.
+     */
+    private fun chooseHevc(support: PresetSupport, p: Preset): Boolean {
+        val canH = support.hevc
+        val canA = support.h264
+        return when (settings.codec) {
+            "h264" -> !canA
+            "hevc" -> canH
+            else -> {
+                val hg = pcHevcGpu
+                val ag = pcH264Gpu
+                when {
+                    hg < 0 && ag < 0 -> canH // todavía no sabemos qué PC es
+                    canH && hg >= p.height -> true
+                    canA && ag >= p.height -> false
+                    canA -> false
+                    else -> canH
+                }
+            }
+        }
+    }
 
     private fun autoBitrateKbps(p: Preset, hevc: Boolean): Int {
         val base = when {
@@ -505,11 +563,7 @@ class StreamEngine(private val context: Context) :
         streamPreset = p
         val support = supports.first { it.preset == p }
 
-        val hevc = when (settings.codec) {
-            "h264" -> !support.h264
-            "hevc" -> support.hevc
-            else -> support.hevc
-        }
+        val hevc = chooseHevc(support, p)
         val mime = if (hevc) MediaFormat.MIMETYPE_VIDEO_HEVC else MediaFormat.MIMETYPE_VIDEO_AVC
         if (settings.codec == "hevc" && !hevc) post("H.265 no disponible por hardware en ${p.label}: usando H.264", false)
         val hw = EncoderCatalog.hardwareEncoder(mime) ?: run { post("No hay codificador por hardware", true); return }
@@ -519,18 +573,23 @@ class StreamEngine(private val context: Context) :
         val quality = settings.isQualityMode
         adaptive.qualityMode = quality
         if (quality) adaptive.maxResLevel = 0 // en calidad nunca se baja la resolución por la red
-        // El máximo se calcula con el preset elegido; el adaptativo ya reduce el techo por nivel de resolución.
-        var maxKbps = if (settings.maxMbps > 0) settings.maxMbps * 1000 else autoBitrateKbps(chosen, hevc)
+        // El máximo se calcula con el preset elegido Y su códec (no con el del escalón actual): si no,
+        // al bajar un escalón que usa otro códec cambiaría el máximo, el adaptativo se reiniciaría a
+        // mitad de camino y la resolución podría volver a subir en plena congestión.
+        val chosenHevc = if (p == chosen) hevc else chooseHevc(supports.first { it.preset == chosen }, chosen)
+        val chosenHw = if (chosenHevc == hevc) hw
+            else EncoderCatalog.hardwareEncoder(if (chosenHevc) MediaFormat.MIMETYPE_VIDEO_HEVC else MediaFormat.MIMETYPE_VIDEO_AVC) ?: hw
+        var maxKbps = if (settings.maxMbps > 0) settings.maxMbps * 1000 else autoBitrateKbps(chosen, chosenHevc)
         if (settings.maxMbps == 0) {
             // En una red local el bitrate es barato: más bits = sombras y zoom sin "manchas".
             maxKbps = (maxKbps * when (mode) { "maxima" -> 2.2; "calidad" -> 1.6; else -> 1.0 }).toInt()
         }
-        maxKbps = minOf(maxKbps, hw.maxBitrate / 1000)
+        maxKbps = minOf(maxKbps, chosenHw.maxBitrate / 1000)
         if (freshStart || adaptive.maxKbps != maxKbps) {
             freshStart = false
             adaptive.reset(maxKbps)
         }
-        val startKbps = minOf(adaptive.bitrateKbps, maxKbps)
+        val startKbps = minOf(adaptive.bitrateKbps, maxKbps, hw.maxBitrate / 1000)
 
         fps = fpsSteps.getOrElse(adaptive.fpsLevel) { p.fps }
         val cfg = VideoEncoder.Config(
@@ -620,6 +679,69 @@ class StreamEngine(private val context: Context) :
         receiverLatencyMs = report.receiverLatencyMs
         handler.post { adaptive.onReport(report, rttMs, minRttMs) }
     }
+
+    override fun onReceiverDecodeCaps(hevcGpuMaxHeight: Int, h264GpuMaxHeight: Int, maxHeight: Int, maxPixelRate: Long, gpu: String) {
+        handler.post {
+            val known = hevcGpuMaxHeight >= 0 || h264GpuMaxHeight >= 0
+            val capsChanged = known && (hevcGpuMaxHeight != pcHevcGpu || h264GpuMaxHeight != pcH264Gpu || gpu != pcGpuName)
+            val ackLimit = PcLimit(maxHeight, maxPixelRate)
+            val limitChanged = ackLimit != lastAckLimit
+            lastAckLimit = ackLimit
+            if (!capsChanged && !limitChanged) return@post
+            if (known) {
+                pcHevcGpu = hevcGpuMaxHeight
+                pcH264Gpu = h264GpuMaxHeight
+                pcGpuName = gpu
+                settings.lastHevcGpuMaxHeight = hevcGpuMaxHeight
+                settings.lastH264GpuMaxHeight = h264GpuMaxHeight
+            }
+            if (limitChanged) pcLimit = ackLimit
+            restartEncoderIfNeeded("Ajustando el video a lo que decodifica este PC")
+        }
+    }
+
+    override fun onReceiverLimit(maxHeight: Int, maxPixelRate: Long, reason: String) {
+        handler.post {
+            val limit = PcLimit(maxHeight, maxPixelRate)
+            // Los HELLO_ACK que siguen traen este mismo límite: que no cuenten como un cambio.
+            lastAckLimit = limit
+            if (limit == pcLimit) return@post
+            pcLimit = limit
+            if (limit.active) post(reason.ifEmpty { "El PC no alcanza a decodificar esta resolución: bajando" }, true)
+            else post("El PC quitó el límite: volviendo a la resolución máxima", false)
+            restartEncoderIfNeeded("")
+        }
+    }
+
+    /** Si con las capacidades/límites actuales cambiaría la resolución o el códec, reinicia el codificador. */
+    private fun restartEncoderIfNeeded(message: String) {
+        val c = camera ?: return
+        if (!streaming) {
+            activePreset = pickPreset(c)
+            fps = activePreset?.fps ?: fps
+            return
+        }
+        val p = pickPreset(c) ?: return
+        val support = supports.firstOrNull { it.preset == p } ?: return
+        val wantHevc = chooseHevc(support, p)
+        val curHevc = codecId == Protocol.CODEC_HEVC
+        if (p == streamPreset && wantHevc == curHevc) return
+        Log.i(TAG, "cambio por el PC: ${streamPreset?.label} ${if (curHevc) "HEVC" else "H.264"} -> ${p.label} ${if (wantHevc) "HEVC" else "H.264"}")
+        if (message.isNotEmpty()) post("$message: ${p.label} ${if (wantHevc) "H.265" else "H.264"}", false)
+        stopEncoder()
+        startEncoder(c)
+        reconfigure()
+    }
+
+    /** Texto para Ajustes: qué decodifica el PC. */
+    val pcDecodeInfo: String
+        get() {
+            fun h(v: Int) = when { v >= 2160 -> "4K"; v >= 1440 -> "1440p"; v >= 1080 -> "1080p"; v == 0 -> "no"; else -> "?" }
+            if (pcHevcGpu < 0 && pcH264Gpu < 0) return "PC: todavía no se sabe qué decodifica su GPU"
+            val gpu = pcGpuName.ifEmpty { "GPU del PC" }
+            val lim = if (pcLimit.active) " · el PC pidió menos resolución (no alcanzaba)" else ""
+            return "$gpu: H.265 ${h(pcHevcGpu)} · H.264 ${h(pcH264Gpu)}$lim"
+        }
 
     override fun onRemoteDisconnect(reason: String) {
         stopStreaming(reason)

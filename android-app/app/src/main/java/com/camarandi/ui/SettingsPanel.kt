@@ -52,7 +52,7 @@ class SettingsPanel(
         // --- Resolución y fps
         section("Resolución y fps")
         val presetGroup = RadioGroup(activity)
-        val autoLabel = "Automática: la mejor que sostiene (${st.recommended?.label ?: "ninguna"})"
+        val autoLabel = "Automática: la máxima del celular con sus fps máximos (${st.recommended?.label ?: "ninguna"})"
         presetGroup.addView(radio(autoLabel, s.presetId.isEmpty()) { s.presetId = ""; engine.applySettings() })
         val ok = st.supports.filter { it.ok }
         for (sup in ok) {
@@ -107,7 +107,7 @@ class SettingsPanel(
         hint(
             if (s.isQualityMode) "Calidad: más bitrate, el codificador reparte los bits donde hacen falta (sombras, ropa oscura, zoom), " +
                 "procesamiento de imagen de alta calidad y un buffer grande en el PC que recupera los paquetes perdidos " +
-                "en vez de saltar frames. Prefiere 30 fps (con poca luz, 60 fps llena las sombras de ruido)."
+                "en vez de saltar frames."
             else "Baja latencia: sirve si necesitas ver la imagen casi al instante; con poca luz o mucho movimiento se ve peor."
         )
 
@@ -181,7 +181,8 @@ class SettingsPanel(
 
     fun refreshDynamic() {
         val st = engine.state()
-        connectionView?.text = "Estado: ${st.connection}" + if (st.receiver.isNotEmpty()) " · receptor: ${st.receiver}" else ""
+        connectionView?.text = "Estado: ${st.connection}" + (if (st.receiver.isNotEmpty()) " · receptor: ${st.receiver}" else "") +
+            "\n" + engine.pcDecodeInfo
         refreshInfo()
     }
 

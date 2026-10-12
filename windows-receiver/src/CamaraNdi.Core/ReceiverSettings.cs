@@ -13,6 +13,8 @@ public sealed class ReceiverSettings
     public int DiscoveryPort { get; set; } = Protocol.DefaultDiscoveryPort;
     /// <summary>"auto" (GPU si hay, si no CPU), "gpu" o "cpu".</summary>
     public string Decoder { get; set; } = "auto";
+    /// <summary>Si el PC no alcanza a decodificar, pedirle al celular menos resolución (si no, sólo avisa).</summary>
+    public bool AutoLowerResolution { get; set; } = true;
     public bool StartWithWindows { get; set; }
     public bool MinimizeToTray { get; set; } = true;
     public bool StartMinimized { get; set; }
