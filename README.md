@@ -349,7 +349,7 @@ celulares**. Lo que sí se probó de verdad:
 | "Detener" 1,2 s y volver a "Transmitir" en el celular | Antes: salían al aire imágenes de antes de la pausa (de hace 1,3 s). Ahora: la imagen más vieja tiene ≈0,2 s |
 | **Cámara virtual** (DLL compilada para Windows, probada con Wine): registro, lista de dispositivos, captura DirectShow | Aparecen las 4 cámaras; 1080p: 61 imágenes a 30,2 fps con contenido que cambia; 4K pedido por la aplicación: 3840x2160 a ~31 fps |
 | Receptor → memoria de la cámara (prueba de punta a punta con el celular simulado en 1080p y "OBS" pidiendo 720p) | 175 imágenes en 5,9 s, todas del tamaño pedido; 4K → 1080p se reduce en ~2,5 ms |
-| En **Windows real** (GitHub Actions, en cada versión) | Registro para todo el PC y por usuario, captura con DirectShow y con FFmpeg (como OBS) en 1080p/4K/720p y NV12/YUY2/RGB32, cartel sin receptor, y celular simulado → receptor → cámara. Si algo falla, no se publica la versión. |
+| En **Windows real** (Windows Server 2025, GitHub Actions, en cada versión; si algo falla no se publica) | Las 4 cámaras aparecen con su nombre correcto. DirectShow: 1080p 90 imágenes a 30,0 fps, 4K a 32 fps, 720p a 30,4 fps. FFmpeg `-f dshow` (se conecta como OBS): 1080p NV12, 4K NV12, 720p YUY2 y 1080p RGB32, todos sin errores. Sin receptor: entrega el cartel. **Celular simulado 1080p30 → receptor → cámara: 121 de 121 imágenes distintas (ninguna repetida) a 30 fps**, ~100 ms de proceso en el receptor. El registro **sólo para el usuario** (sin pedir permiso) lo ven tanto un programa normal como uno abierto como administrador. |
 
 No se pudo probar aquí: cámara real del celular, codificador por hardware, OBS en Windows (sí FFmpeg/DirectShow), D3D11VA y la interfaz WPF/Android en pantalla.
 
