@@ -1,16 +1,26 @@
 RECEPTOR CÁMARA NDI (Windows x64)
 =================================
 
-1. Requisito: NDI Runtime instalado. Si ya usas NDI en OBS con DistroAV, ya lo tienes.
-   Si no: instala "NDI Tools" desde https://ndi.video/tools/ (incluye el runtime).
-2. Ejecuta ReceptorCamaraNDI.exe (no hace falta instalar .NET: va incluido).
+No hay que instalar nada más (ni NDI Tools ni plugins de OBS).
+
+1. Ejecuta ReceptorCamaraNDI.exe (no hace falta instalar .NET: va incluido).
+   No borres ni muevas las carpetas "ffmpeg" y "camara-virtual" que están al lado.
    La primera vez Windows pregunta por el Firewall: marca "Redes privadas" y Permitir.
    Si los celulares no lo encuentran, ejecuta abrir-firewall.bat como administrador.
+2. Arriba en el receptor debe decir "Cámaras para OBS listas". Si aparece el botón
+   "Instalar cámaras para OBS", púlsalo y acepta el permiso de Windows (una sola vez).
 3. En el celular abre "Cámara NDI" y pulsa el botón rojo (Transmitir).
-4. En OBS: Agregar fuente > NDI Source > elige "PC (Cel 1 - ...)".
-   En la fuente NDI pon "Latency mode: Lowest" y "Bandwidth: Highest".
+4. En OBS: Fuentes > + > "Dispositivo de captura de vídeo" > Dispositivo:
+   "Cámara NDI - Celular 1" (el segundo celular es "Celular 2", etc.).
+   Para la resolución completa: Tipo de resolución/FPS "Personalizado" y
+   Resolución 1920x1080 (celular en 1080p) o 3840x2160 (celular en 4K).
 
-Carpeta "ffmpeg": DLLs de FFmpeg 6.1 (decodificación H.264/H.265). No la borres.
+NDI es opcional: sólo sirve para mandar los celulares a OTRO PC por la red
+(casilla "Publicar también por NDI"; necesita NDI Runtime en los dos PC).
+
+Carpeta "ffmpeg": DLLs de FFmpeg 6.1 (decodificación H.264/H.265 y escalado).
+Carpeta "camara-virtual": las cámaras "Cámara NDI - Celular 1..4" que ve OBS.
+  Antes de borrar esta carpeta, pulsa "Quitar cámaras de Windows" en el receptor.
 Registros (logs): %LOCALAPPDATA%\ReceptorCamaraNDI\logs
 Configuración:    %LOCALAPPDATA%\ReceptorCamaraNDI\config.json
 

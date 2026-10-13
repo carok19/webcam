@@ -32,7 +32,7 @@
   <ItemGroup>
     <Resource Include="app.ico" />
     <ProjectReference Include="..\CamaraNdi.Core\CamaraNdi.Core.csproj" />
-    <!-- DLLs de FFmpeg 6.1 para Windows x64. Sólo se copian las 3 que hacen falta (ver target abajo). -->
+    <!-- DLLs de FFmpeg 6.1 para Windows x64. Sólo se copian las 4 que hacen falta (ver target abajo). -->
     <PackageReference Include="Sdcb.FFmpeg.runtime.windows-x64" Version="6.1.0" ExcludeAssets="all" GeneratePathProperty="true" />
   </ItemGroup>
 
@@ -40,6 +40,7 @@
     <FfmpegDll Include="$(PkgSdcb_FFmpeg_runtime_windows-x64)\runtimes\win-x64\native\avcodec-60.dll" />
     <FfmpegDll Include="$(PkgSdcb_FFmpeg_runtime_windows-x64)\runtimes\win-x64\native\avutil-58.dll" />
     <FfmpegDll Include="$(PkgSdcb_FFmpeg_runtime_windows-x64)\runtimes\win-x64\native\swresample-4.dll" />
+    <FfmpegDll Include="$(PkgSdcb_FFmpeg_runtime_windows-x64)\runtimes\win-x64\native\swscale-7.dll" />
     <None Include="..\..\dist-extra\**\*" LinkBase="." CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" ExcludeFromSingleFile="true" />
   </ItemGroup>
 
@@ -48,5 +49,19 @@
   </Target>
   <Target Name="CopyFfmpegPublish" AfterTargets="Publish">
     <Copy SourceFiles="@(FfmpegDll)" DestinationFolder="$(PublishDir)ffmpeg" SkipUnchangedFiles="true" />
+  </Target>
+
+  <!-- Cámaras virtuales para OBS (CamaraVirtual.dll, C++). La compila CMake: ver virtualcam/CMakeLists.txt.
+       Va en la carpeta camara-virtual\ junto al .exe. Con -p:RequireCamaraVirtual=true (CI) falta = error. -->
+  <PropertyGroup>
+    <CamaraVirtualDll Condition="'$(CamaraVirtualDll)' == ''">$(MSBuildThisFileDirectory)..\..\virtualcam\build\Release\CamaraVirtual.dll</CamaraVirtualDll>
+  </PropertyGroup>
+  <Target Name="CopyVCamBuild" AfterTargets="Build" Condition="Exists('$(CamaraVirtualDll)')">
+    <Copy SourceFiles="$(CamaraVirtualDll)" DestinationFolder="$(OutDir)camara-virtual" SkipUnchangedFiles="true" />
+  </Target>
+  <Target Name="CopyVCamPublish" AfterTargets="Publish">
+    <Error Condition="'$(RequireCamaraVirtual)' == 'true' And !Exists('$(CamaraVirtualDll)')" Text="Falta $(CamaraVirtualDll): compila virtualcam con CMake antes de publicar." />
+    <Warning Condition="'$(RequireCamaraVirtual)' != 'true' And !Exists('$(CamaraVirtualDll)')" Text="No está $(CamaraVirtualDll): el receptor quedará sin cámaras virtuales para OBS." />
+    <Copy Condition="Exists('$(CamaraVirtualDll)')" SourceFiles="$(CamaraVirtualDll)" DestinationFolder="$(PublishDir)camara-virtual" SkipUnchangedFiles="true" />
   </Target>
 </Project>

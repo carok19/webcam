@@ -18,6 +18,9 @@ public partial class MainWindow : Window
     private bool _loading = true;
     private bool _trayHintShown;
     private int _ndiRetryTicks;
+    /// <summary>Estado de las cámaras virtuales: checking, ok (todo el PC), ok-user (sólo este usuario), needs-admin,
+    /// installing, removed, missing, off.</summary>
+    private volatile string _camState = "checking";
     private TimeSpan _lastCpu;
     private DateTime _lastCpuWall;
     private double _cpuPct;
@@ -50,6 +53,8 @@ public partial class MainWindow : Window
         StartWithWindows.IsChecked = s.StartWithWindows;
         MinimizeToTray.IsChecked = s.MinimizeToTray;
         AutoLower.IsChecked = s.AutoLowerResolution;
+        NdiOutput.IsChecked = s.NdiOutput;
+        AiEnhance.IsChecked = s.AiEnhance;
         foreach (ComboBoxItem it in DecoderCombo.Items)
             if ((string)it.Tag == s.Decoder) DecoderCombo.SelectedItem = it;
         if (DecoderCombo.SelectedItem == null) DecoderCombo.SelectedIndex = 0;
@@ -61,8 +66,10 @@ public partial class MainWindow : Window
             ErrorText.Visibility = Visibility.Visible;
         }
 
+        SessionViewModel.CameraChangeRequested = (sess, index) => _app.Server?.SetCamera(sess, index);
         if (_app.Server != null)
         {
+            _app.Server.SettingsChanged += () => Dispatcher.BeginInvoke(() => _app.SaveSettings());
             _app.Server.SessionAdded += sess => Dispatcher.BeginInvoke(() => _cards.Add(new SessionViewModel(sess)));
             _app.Server.SessionRemoved += sess => Dispatcher.BeginInvoke(() =>
             {
@@ -72,6 +79,7 @@ public partial class MainWindow : Window
             _app.Server.Notice += msg => Dispatcher.BeginInvoke(() => { ErrorText.Text = msg; ErrorText.Visibility = Visibility.Visible; });
         }
 
+        _ = CheckCamerasAsync();
         _timer = new DispatcherTimer(TimeSpan.FromMilliseconds(500), DispatcherPriority.Background, (_, _) => Refresh(), Dispatcher);
         _timer.Start();
         Refresh();
@@ -83,19 +91,23 @@ public partial class MainWindow : Window
     {
         var ips = ReceiverServer.LocalAddresses();
         int port = _app.Server?.MediaPort ?? _app.Settings.MediaPort;
-        StatusText.Text = $"{(NdiLib.IsLoaded ? "✔ " : "✖ ")}{NdiLib.Status}   ·   {(VideoDecoder.FfmpegStatus.StartsWith("FFmpeg ") ? "✔ " : "✖ ")}{VideoDecoder.FfmpegStatus}   ·   " +
-                          $"Escuchando en UDP {port}   ·   IP de este PC: {string.Join(", ", ips)}";
+        string ndi = !_app.Settings.NdiOutput ? "NDI: apagado"
+            : NdiLib.IsLoaded ? NdiLib.Status
+            : "NDI: no instalado (opcional, sólo para mandar a otro PC)";
+        StatusText.Text = $"{(VideoDecoder.FfmpegStatus.StartsWith("FFmpeg ") ? "✔ " : "✖ ")}{VideoDecoder.FfmpegStatus}   ·   " +
+                          $"Escuchando en UDP {port}   ·   IP de este PC: {string.Join(", ", ips)}   ·   {ndi}";
+        UpdateCameraStatus();
         GpuText.Text = "Decodificación: " + CamaraNdi.Core.Decoding.DecoderProbe.Current.Describe() + $"   ·   CPU del PC (receptor): {PcCpu():F0} %";
         JitterSlider.IsEnabled = UsePhoneMode.IsChecked != true;
         JitterText.Text = UsePhoneMode.IsChecked == true ? "lo elige cada celular" : $"{(int)JitterSlider.Value} ms";
-        NdiMissingPanel.Visibility = NdiLib.IsLoaded ? Visibility.Collapsed : Visibility.Visible;
-        // Si falta NDI, volver a buscarlo cada ~10 s (por si lo acaban de instalar).
-        if (!NdiLib.IsLoaded && ++_ndiRetryTicks % 20 == 0) NdiLib.Retry();
+        // Si NDI está activado pero falta, volver a buscarlo cada ~10 s (por si lo acaban de instalar).
+        if (_app.Settings.NdiOutput && !NdiLib.IsLoaded && ++_ndiRetryTicks % 20 == 0) NdiLib.Retry();
         EmptyHint.Visibility = _cards.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
         EmptyHintText.Text = "Abre la app Cámara NDI en el celular (misma red WiFi) y pulsa Transmitir. " +
                              "El celular encuentra este PC solo; si no, escribe en el celular una de estas IP: " +
                              string.Join(", ", ips.Select(i => i.Split(' ')[0])) +
-                             ". Si Windows pregunta por el Firewall, permite el acceso en redes privadas.";
+                             ". Si Windows pregunta por el Firewall, permite el acceso en redes privadas. " +
+                             "En OBS: + (Fuentes) → «Dispositivo de captura de vídeo» → «Cámara NDI - Celular 1».";
         foreach (var c in _cards) c.Update();
         if (LogBox.IsVisible)
         {
@@ -127,6 +139,12 @@ public partial class MainWindow : Window
             foreach (var session in _app.Server?.Sessions ?? Array.Empty<PhoneSession>()) session.ClearLimit();
         }
         s.AutoLowerResolution = autoLower;
+        s.NdiOutput = NdiOutput.IsChecked == true;
+        if (s.AiEnhance != (AiEnhance.IsChecked == true))
+        {
+            s.AiEnhance = AiEnhance.IsChecked == true;
+            if (s.AiEnhance) _ = Task.Run(() => Log.Info("Mejora con IA: " + CamaraNdi.Core.VirtualCam.D3D11VsrScaler.Describe()));
+        }
         var decoder = (DecoderCombo.SelectedItem as ComboBoxItem)?.Tag as string ?? "auto";
         if (decoder != s.Decoder)
         {
@@ -149,8 +167,83 @@ public partial class MainWindow : Window
 
     private void OnLatencyClock(object sender, RoutedEventArgs e) => new LatencyClockWindow().Show();
 
-    private void OnDownloadNdi(object sender, RoutedEventArgs e) =>
-        Process.Start(new ProcessStartInfo("https://ndi.video/tools/") { UseShellExecute = true });
+    // ---------------- Cámaras virtuales ----------------
+
+    private async Task CheckCamerasAsync()
+    {
+        if (!_app.Settings.VirtualCameras || _app.Server?.VirtualCams == null) { _camState = "off"; return; }
+        if (!VCamInstaller.DllPresent) { _camState = "missing"; return; }
+        _camState = "checking";
+        UpdateCameraStatus();
+        // Primero sin pedir permiso (sólo para este usuario); si Windows no las muestra así, se ofrece el botón.
+        _camState = await Task.Run(() =>
+        {
+            bool ok = VCamInstaller.IsInstalledHere() || VCamInstaller.TryInstallPerUser();
+            return !ok ? "needs-admin" : VCamInstaller.MachineWideHere() ? "ok" : "ok-user";
+        });
+        UpdateCameraStatus();
+    }
+
+    private async void OnInstallCameras(object sender, RoutedEventArgs e)
+    {
+        _camState = "installing";
+        UpdateCameraStatus();
+        bool ok = await Task.Run(() =>
+        {
+            // También el registro del usuario (si quedó uno viejo apuntando a otra carpeta, manda sobre el del PC).
+            VCamInstaller.TryInstallPerUser();
+            return VCamInstaller.InstallForAllUsers();
+        });
+        _camState = ok ? "ok" : await Task.Run(() => VCamInstaller.IsInstalledHere()) ? "ok-user" : "needs-admin";
+        UpdateCameraStatus();
+        ErrorText.Text = ok ? "" : "No se pudieron instalar las cámaras para todo el PC (¿se canceló el permiso?). Puedes intentarlo de nuevo; los detalles están en el registro.";
+        ErrorText.Visibility = ok ? Visibility.Collapsed : Visibility.Visible;
+    }
+
+    private async void OnUninstallCameras(object sender, RoutedEventArgs e)
+    {
+        if (MessageBox.Show(this, "¿Quitar las cámaras «Cámara NDI - Celular 1..4» de Windows?\n\nOBS dejará de verlas. Si vuelves a abrir el receptor, se instalan de nuevo.",
+                "Quitar cámaras", MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes) return;
+        UninstallCamsButton.IsEnabled = false;
+        bool ok = await Task.Run(VCamInstaller.Uninstall);
+        UninstallCamsButton.IsEnabled = true;
+        _camState = "removed";
+        UpdateCameraStatus();
+        if (!ok)
+        {
+            ErrorText.Text = "No se pudieron quitar las cámaras de todo el PC (¿se canceló el permiso?).";
+            ErrorText.Visibility = Visibility.Visible;
+        }
+    }
+
+    private void UpdateCameraStatus()
+    {
+        (string text, string color) = _camState switch
+        {
+            "ok" or "ok-user" => ("✔ Cámaras para OBS listas: en OBS agrega «Dispositivo de captura de vídeo» y elige «Cámara NDI - Celular 1» (2, 3, 4…). " +
+                     "Para 4K: en sus propiedades, Resolución/FPS «Personalizado» → 3840x2160.", "#81C995"),
+            "needs-admin" => ("", "#FFD180"),
+            "installing" => ("Instalando las cámaras para OBS… (acepta el permiso de Windows)", "#FFD180"),
+            "removed" => ("Cámaras quitadas de Windows. Se instalan de nuevo la próxima vez que abras el receptor.", "#9AA0A6"),
+            "missing" => ("✖ Falta la carpeta «camara-virtual» junto al programa: descomprime el zip completo.", "#FF8A80"),
+            "off" => ("Cámaras virtuales apagadas.", "#9AA0A6"),
+            _ => ("Preparando las cámaras para OBS…", "#9AA0A6"),
+        };
+        CamStatusText.Text = text;
+        CamStatusText.Foreground = (System.Windows.Media.Brush)new System.Windows.Media.BrushConverter().ConvertFromString(color)!;
+        CamStatusText.Visibility = text.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
+        // Sin permiso de administrador las cámaras quedan sólo para este usuario; si OBS no las ve (por ejemplo
+        // porque se abre "como administrador"), con el botón se instalan para todo el PC.
+        bool needs = _camState == "needs-admin";
+        VCamPanel.Visibility = needs || _camState == "ok-user" || _camState == "installing" ? Visibility.Visible : Visibility.Collapsed;
+        VCamPanelText.Text = needs || _camState == "installing"
+            ? "Para que OBS vea los celulares hay que instalar las cámaras (una sola vez)."
+            : "¿No aparecen en OBS? (por ejemplo si abres OBS como administrador)";
+        VCamPanelText.Foreground = (System.Windows.Media.Brush)new System.Windows.Media.BrushConverter().ConvertFromString(needs ? "#FFD180" : "#9AA0A6")!;
+        InstallCamsButton.Content = needs ? "Instalar cámaras para OBS" : "Instalar para todo el PC";
+        InstallCamsButton.IsEnabled = _camState != "installing";
+        UninstallCamsButton.Visibility = _camState is "ok" or "ok-user" or "needs-admin" ? Visibility.Visible : Visibility.Collapsed;
+    }
 
     private static SessionViewModel? Vm(object sender) => (sender as FrameworkElement)?.Tag as SessionViewModel;
 

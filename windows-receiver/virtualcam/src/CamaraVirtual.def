@@ -1,0 +1,8 @@
+LIBRARY CamaraVirtual
+EXPORTS
+    DllGetClassObject       PRIVATE
+    DllCanUnloadNow         PRIVATE
+    DllRegisterServer       PRIVATE
+    DllUnregisterServer     PRIVATE
+    DllInstall              PRIVATE
+    VCam_VisibleCount

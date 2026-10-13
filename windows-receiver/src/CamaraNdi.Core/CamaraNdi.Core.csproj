@@ -5,6 +5,8 @@
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="FFmpeg.AutoGen" Version="6.1.0.1" />
+    <!-- Direct3D 11 para la mejora opcional con IA de la GPU (NVIDIA RTX Video). MIT. -->
+    <PackageReference Include="Vortice.Direct3D11" Version="3.8.3" />
   </ItemGroup>
   <ItemGroup>
     <InternalsVisibleTo Include="CamaraNdi.Tests" />

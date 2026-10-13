@@ -30,19 +30,43 @@ jobs:
           path: android-app/CamaraNDI.apk
 
   windows:
-    name: Receptor Windows (.exe)
+    name: Receptor Windows (.exe) + cámaras para OBS
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: "8.0.x"
+      - name: Compilar las cámaras virtuales (C++, DirectShow)
+        run: |
+          cmake -S windows-receiver/virtualcam -B windows-receiver/virtualcam/build -A x64
+          cmake --build windows-receiver/virtualcam/build --config Release
       - name: Pruebas (las de punta a punta se omiten si no hay FFmpeg en el sistema)
         run: dotnet test windows-receiver/tests/CamaraNdi.Tests -c Release
+      - name: Preparar el celular simulado y el receptor sin interfaz (con FFmpeg)
+        shell: pwsh
+        run: |
+          dotnet build windows-receiver/tools/SimSender -c Release -o out/sim
+          $native = Join-Path $env:USERPROFILE ".nuget/packages/sdcb.ffmpeg.runtime.windows-x64/6.1.0/runtimes/win-x64/native"
+          if (-not (Test-Path $native)) { dotnet restore windows-receiver/src/ReceptorNdi }
+          New-Item -ItemType Directory -Force out/sim/ffmpeg | Out-Null
+          Copy-Item "$native/*.dll" out/sim/ffmpeg/
+          Get-ChildItem out/sim/ffmpeg | Format-Table Name, Length
+      - name: Probar las cámaras en Windows (registro, 1080p/4K, NV12/YUY2/RGB32, cadena completa)
+        shell: pwsh
+        run: ./windows-receiver/virtualcam/tools/ci-test.ps1 -Build windows-receiver/virtualcam/build/Release -SimBin out/sim
       - name: Publicar versión completa (incluye .NET)
-        run: dotnet publish windows-receiver/src/ReceptorNdi -c Release -r win-x64 -o out/completo/ReceptorCamaraNDI
+        run: dotnet publish windows-receiver/src/ReceptorNdi -c Release -r win-x64 -p:RequireCamaraVirtual=true -o out/completo/ReceptorCamaraNDI
       - name: Publicar versión ligera (requiere .NET 8 Desktop Runtime)
-        run: dotnet publish windows-receiver/src/ReceptorNdi -c Release -r win-x64 --self-contained false -p:EnableCompressionInSingleFile=false -o out/ligero/ReceptorCamaraNDI
+        run: dotnet publish windows-receiver/src/ReceptorNdi -c Release -r win-x64 --self-contained false -p:EnableCompressionInSingleFile=false -p:RequireCamaraVirtual=true -o out/ligero/ReceptorCamaraNDI
+      - name: Revisar que el zip lleve todo
+        shell: pwsh
+        run: |
+          foreach ($d in "out/completo/ReceptorCamaraNDI", "out/ligero/ReceptorCamaraNDI") {
+            foreach ($f in "ReceptorCamaraNDI.exe", "camara-virtual/CamaraVirtual.dll", "ffmpeg/avcodec-60.dll", "ffmpeg/swscale-7.dll", "LEEME.txt") {
+              if (-not (Test-Path (Join-Path $d $f))) { throw "Falta $f en $d" }
+            }
+          }
       - name: Comprimir
         shell: pwsh
         run: |
@@ -64,7 +88,7 @@ jobs:
         with:
           dotnet-version: "8.0.x"
       - name: Instalar FFmpeg 6.1
-        run: sudo apt-get update && sudo apt-get install -y libavcodec60 libavutil58
+        run: sudo apt-get update && sudo apt-get install -y libavcodec60 libavutil58 libswscale7
       - name: Pruebas
         run: dotnet test windows-receiver/tests/CamaraNdi.Tests -c Release --logger "console;verbosity=normal"
 
@@ -92,10 +116,11 @@ jobs:
           body: |
             **Descargas**
             - `CamaraNDI.apk` — app para el celular (Android 8 o superior).
-            - `ReceptorCamaraNDI-win-x64.zip` — receptor para Windows 10/11, no requiere instalar nada más que NDI Tools.
+            - `ReceptorCamaraNDI-win-x64.zip` — receptor para Windows 10/11. Se descomprime y se abre: no hay que instalar nada más (ni NDI Tools).
             - `ReceptorCamaraNDI-win-x64-ligero.zip` — igual pero más pequeño; requiere el ".NET 8 Desktop Runtime x64" de Microsoft.
 
-            En el PC hace falta **NDI Tools** (https://ndi.video/tools/). Instrucciones completas en el README.
+            **En OBS:** Fuentes → + → «Dispositivo de captura de vídeo» → «Cámara NDI - Celular 1» (2, 3, 4…).
+            NDI es opcional: sólo hace falta para mandar los celulares a OTRO PC. Instrucciones completas en el README.
           files: |
             artefactos/CamaraNDI.apk
             artefactos/ReceptorCamaraNDI-win-x64.zip

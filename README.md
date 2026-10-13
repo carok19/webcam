@@ -1,37 +1,44 @@
 # Cámara NDI — el celular como cámara para OBS
 
 Sistema tipo DroidCam / NDI HX Camera, pero simple: **imagen natural y fluida**, con el retraso que tú elijas
-(desde ~0,1 s hasta ~1 s a cambio de más calidad).
+(desde ~0,1 s hasta ~1 s a cambio de más calidad). Como DroidCam: **sólo el APK y el .exe**, no hay que instalar
+NDI Tools ni plugins en OBS.
 
 ```
- Celular Android ──WiFi (UDP)──▶ Receptor Windows (.exe) ──NDI──▶ OBS (DistroAV)
- Camera2 → H.265/H.264 por hardware   decodifica (GPU)     una fuente NDI por celular
+ Celular Android ──WiFi (UDP)──▶ Receptor Windows (.exe) ──▶ OBS: «Dispositivo de captura de vídeo»
+ Camera2 → H.265/H.264 por hardware   decodifica (GPU)        «Cámara NDI - Celular 1», «… 2», «… 3»
 ```
 
 ## 0. Cómo se conecta todo (en palabras simples)
 
-Son **tres piezas** y cada una hace una sola cosa:
+Son **dos piezas** (y OBS) y cada una hace una sola cosa:
 
 | Pieza | Dónde se instala | Qué hace |
 |---|---|---|
 | **App "Cámara NDI"** | En cada celular | Toma el video de la cámara, lo comprime (H.265/H.264) y lo manda por el WiFi al PC. |
-| **Receptor Cámara NDI** (`ReceptorCamaraNDI.exe`) | En el PC con OBS | Recibe el video de los celulares, recupera los paquetes que se pierden en el WiFi, lo descomprime con la tarjeta gráfica, **corrige el rango de color** y publica **una fuente NDI por celular** ("Cel 1", "Cel 2"…). |
-| **NDI Tools / NDI Runtime** | En el PC (se instala una vez) | No es un programa que haya que abrir: es la "librería" de NDI que permite que un programa le pase video a otro. El receptor la usa para **publicar** y OBS la usa para **leer**. |
-| **OBS + plugin DistroAV** | En el PC | DistroAV agrega a OBS la fuente **"NDI™ Source"**. Ahí eliges `NOMBRE-PC (Cel 1 - …)` y el celular aparece como una cámara más. |
+| **Receptor Cámara NDI** (`ReceptorCamaraNDI.exe`) | En el PC con OBS (se descomprime el zip y listo) | Recibe el video de los celulares, recupera los paquetes que se pierden en el WiFi, lo descomprime con la tarjeta gráfica, **corrige el rango de color** y lo entrega a las **cámaras "Cámara NDI - Celular 1, 2, 3, 4"**, que OBS (y cualquier programa) ve como webcams. |
+| **OBS** | En el PC | Sin plugins: *Fuentes → + → Dispositivo de captura de vídeo* → «Cámara NDI - Celular 1». |
 
 ```
- Celular ──WiFi──▶ Receptor (.exe) ──▶ [NDI Runtime] ──▶ OBS: fuente "NDI Source" ──▶ YouTube / Facebook / grabación
-                   corrige color,       (va dentro          (plugin DistroAV)
-                   recupera pérdidas     del PC)
+ Celular ──WiFi──▶ Receptor (.exe) ──memoria compartida──▶ «Cámara NDI - Celular 1» ──▶ OBS ──▶ YouTube / Facebook / grabación
+                   corrige color,      (dentro del PC, sin                (como una webcam)
+                   recupera pérdidas    comprimir de nuevo)
 ```
 
-* Todo esto pasa **dentro del mismo PC**: entre el receptor y OBS no hay WiFi de por medio, así que esa parte no
-  pierde calidad ni agrega retraso apreciable.
-* El orden para abrirlos no importa. Si cierras el receptor, OBS muestra el último cuadro; al volver a abrirlo,
-  los celulares se reconectan solos y OBS sigue en la misma fuente.
+* Entre el receptor y OBS la imagen pasa **sin volver a comprimirse** (memoria compartida dentro del mismo PC):
+  no pierde calidad ni agrega retraso apreciable. Sólo se trabaja cuando OBS de verdad está mirando la cámara.
+* Cada celular recibe **su** cámara y la conserva: el primero que se conecta queda en «Celular 1», el segundo en
+  «Celular 2»… y la próxima vez cada uno vuelve a la suya. En la tarjeta del celular se puede cambiar.
+* El orden para abrirlos no importa. Si el receptor está cerrado o el celular no transmite, la cámara muestra un
+  cartel ("Abre el Receptor…" / "Esperando video del celular…") en vez de quedar negra; cuando vuelve el video,
+  OBS sigue en la misma fuente sin tocar nada.
+* **¿Y NDI?** Ya no hace falta. Queda como opción (casilla "Publicar también por NDI") sólo para mandar los
+  celulares a **otro PC** por la red; para eso sí se necesita el NDI Runtime en los dos PC. En el mismo PC la
+  cámara es igual o mejor: no hay una compresión extra y gasta menos CPU.
 
 * `android-app/` — app Android en Kotlin (Camera2 + MediaCodec por Surface, servicio en primer plano).
-* `windows-receiver/` — receptor en C# / .NET 8 (WPF) con FFmpeg para decodificar y NDI para publicar.
+* `windows-receiver/` — receptor en C# / .NET 8 (WPF) con FFmpeg para decodificar; `windows-receiver/virtualcam/`
+  es la cámara virtual (C++, DirectShow) que ve OBS.
 * `docs/PROTOCOLO.md` — el protocolo de red, byte a byte.
 
 Todo en español. Soporta de 2 a 3 celulares a la vez (el límite por defecto es 4).
@@ -50,12 +57,12 @@ Todo en español. Soporta de 2 a 3 celulares a la vez (el límite por defecto es
 | Codificador | Modos rápidos: CBR, keyframe cada 1 s, `KEY_LATENCY=1`. **Modos de calidad**: VBR, keyframe cada 2 s, +60 % / +120 % de bitrate y tope de cuantización (Android 12+). Siempre sin B-frames. | En calidad el codificador pone los bits donde hacen falta (sombras, ropa oscura, zoom) en vez de repartirlos parejo. |
 | WiFi | Marca DSCP CS5 (cola de video WMM), WifiLock de baja latencia, socket atado al WiFi | El router prioriza el video; los datos móviles no "roban" la conexión. |
 | Decodificación | FFmpeg con D3D11VA (cualquier GPU: NVIDIA, AMD, Intel), luego DXVA2, luego CPU | Sin hilos por frame (cada uno suma 1 frame de retraso). |
-| Color | El receptor lee el **rango** (completo 0–255 o limitado 16–235) y la **matriz** (BT.601/709) del video y lo deja en limitado BT.709, que es lo que NDI y OBS esperan. Si el celular no lo dice, lo detecta. | Si un video de rango completo se pasa tal cual, **todo lo oscuro se vuelve negro puro** (ver sección 3b). Cuesta ~1 ms por frame. |
-| Salida | Una fuente NDI por celular, envío asíncrono NV12/I420 | Mínimo trabajo de CPU en el PC. |
+| Color | El receptor lee el **rango** (completo 0–255 o limitado 16–235) y la **matriz** (BT.601/709) del video y lo deja en limitado BT.709, que es lo que OBS espera. Si el celular no lo dice, lo detecta. | Si un video de rango completo se pasa tal cual, **todo lo oscuro se vuelve negro puro** (ver sección 3b). Cuesta ~1 ms por frame. |
+| Salida | **Cámaras virtuales DirectShow** ("Cámara NDI - Celular 1..4", una DLL propia) alimentadas por memoria compartida; NDI opcional | OBS las abre como cualquier webcam, sin plugins ni NDI Tools. Si OBS pide otro tamaño (por ejemplo 1080p con un celular en 4K) el receptor lo reduce con promedio exacto 2x2 (o el escalado de FFmpeg) fuera del hilo de video. |
 | Descubrimiento | Broadcast UDP (puerto 47811) + IP escrita a mano + recuerda la última IP | Más simple y fiable que mDNS en Windows; funciona en cualquier router doméstico. |
 
 **Presupuesto de latencia estimado** (modo "mínima", 1080p30, WiFi 5 GHz; en "calidad" súmale ~0,3 s y en "máxima" ~0,5–0,8 s): exposición/lectura del sensor ~20–33 ms + ISP ~10 ms
-+ codificación 10–25 ms + red 2–10 ms + decodificación GPU 2–6 ms + NDI→OBS ~1 frame + pantalla ~1 frame ≈ **80–140 ms**.
++ codificación 10–25 ms + red 2–10 ms + decodificación GPU 2–6 ms + cámara→OBS ~1 frame + pantalla ~1 frame ≈ **80–140 ms**.
 Es una estimación: la cifra real se mide con el método de la sección 7.
 
 ## 2. Instalación rápida
@@ -66,24 +73,30 @@ Es una estimación: la cifra real se mide con el método de la sección 7.
 3. En ⚙ Ajustes pon el nombre (ej. "Cel 1") y, recomendado, toca **"Permitir sin restricciones de batería"**.
 
 ### PC con Windows 10/11 (64 bits)
-1. Instala **NDI Tools** (incluye el *NDI Runtime*) desde <https://ndi.video/tools/>.
-   Si ya usas DistroAV en OBS, el runtime ya está instalado.
-2. Descomprime `ReceptorCamaraNDI-win-x64.zip` donde quieras y ejecuta `ReceptorCamaraNDI.exe`.
-   No hace falta instalar .NET (va dentro del .exe).
+1. Descomprime `ReceptorCamaraNDI-win-x64.zip` donde quieras (por ejemplo en `Documentos`) y ejecuta
+   `ReceptorCamaraNDI.exe`. No hace falta instalar .NET (va dentro del .exe) ni NDI Tools.
+   **No borres ni muevas** las carpetas `ffmpeg` y `camara-virtual` que vienen al lado.
+2. Al abrirlo, el receptor instala solo las cámaras «Cámara NDI - Celular 1..4» para tu usuario de Windows
+   (arriba dice **"✔ Cámaras para OBS listas"**). Si Windows no las muestra así, aparece el botón
+   **"Instalar cámaras para OBS"**: púlsalo y acepta el permiso de administrador (**una sola vez**).
+   Si mueves la carpeta a otro lugar, el receptor las vuelve a registrar al abrirlo.
 3. Cuando Windows pregunte por el Firewall, permite **redes privadas**. Si los celulares no aparecen,
    ejecuta `abrir-firewall.bat` como administrador y comprueba que tu WiFi esté como **red privada**.
 
 ### OBS
-1. Instala el plugin **DistroAV** (antes "OBS-NDI"): <https://github.com/DistroAV/DistroAV/releases>.
-2. *Fuentes → + → NDI™ Source* → elige `NOMBRE-PC (Cel 1 - Infinix …)`.
-3. Propiedades de la fuente (los nombres pueden variar un poco según la versión de DistroAV):
-   * **Bandwidth: Highest** — ¡importante! "Lowest" manda una versión pequeña y borrosa.
-   * **YUV Range: Partial** y **YUV Color Space: BT.709** — es lo que manda el receptor. Si aquí pones "Full",
-     los negros se ven grises; si el video llegara en rango completo y aquí dice "Partial", los negros se aplastan
-     (el receptor ya evita esto último).
-   * **Latency mode**: "Normal" si usas los modos de calidad; "Lowest" sólo si usas "Mínima latencia".
-4. Repite para cada celular.
-5. ¿Otra app que no usa NDI (Zoom, Meet…)? En OBS pulsa **Iniciar cámara virtual**: esa app verá la escena de OBS.
+1. *Fuentes → + → **Dispositivo de captura de vídeo*** → nombre "Celular 1" → *Dispositivo:* **«Cámara NDI - Celular 1»**.
+2. Para usar la resolución completa del celular: *Resolución/Tipo de FPS:* **Personalizado** →
+   *Resolución:* **1920x1080** (celular en 1080p) o **3840x2160** (celular en 4K) → *FPS:* **"Igualar FPS de salida"**.
+   Con "Predeterminado del dispositivo" la cámara entrega 1920x1080 a 30 fps (si el celular manda 4K, se reduce
+   a la mitad con promedio exacto, que se ve muy nítido).
+3. *Espacio de color:* **Predeterminado** o **709**; *Rango de color:* **Predeterminado** o **Parcial** (es lo que
+   entrega el receptor). Si ves pequeños saltos de movimiento, pon *Almacenamiento en búfer:* **Activar**
+   (suma ~2 cuadros de retraso pero el movimiento queda parejo).
+4. Repite con «Cámara NDI - Celular 2», «… 3». En la tarjeta de cada celular del receptor dice qué cámara usa y
+   si OBS la está usando.
+5. ¿Otra app (Zoom, Meet, el navegador)? También ven «Cámara NDI - Celular N» como una webcam más.
+6. ¿Mandar los celulares a **otro PC** por la red? Marca "Publicar también por NDI" en el receptor e instala el
+   NDI Runtime en los dos PC; en el otro PC usa OBS con el plugin DistroAV (*NDI™ Source*, **Bandwidth: Highest**).
 
 ## 3. Uso de la app (pantalla)
 
@@ -149,13 +162,13 @@ Nada de esto es un "filtro": son maneras de no perder información que la cámar
 
 | Causa | Qué pasa | Qué se hizo / qué hacer |
 |---|---|---|
-| **Rango de color mal interpretado** | Muchos Android graban en rango completo (negro = 0). NDI/OBS esperan rango limitado (negro = 16). Si nadie convierte, todo lo que está entre 0 y 16 —justo los negros con detalle— se vuelve negro puro. | **Corregido en el receptor** (automático). En la tarjeta de cada celular, la línea **Color** dice qué detectó. Si aun así ves negros aplastados, prueba "Rango de entrada: Completo"; si los ves grises/lavados, "Limitado". |
+| **Rango de color mal interpretado** | Muchos Android graban en rango completo (negro = 0). OBS espera rango limitado (negro = 16). Si nadie convierte, todo lo que está entre 0 y 16 —justo los negros con detalle— se vuelve negro puro. | **Corregido en el receptor** (automático). En la tarjeta de cada celular, la línea **Color** dice qué detectó. Si aun así ves negros aplastados, prueba "Rango de entrada: Completo"; si los ves grises/lavados, "Limitado". |
 | **Pocos bits en zonas oscuras** | Con poco bitrate, el codificador "ahorra" en lo oscuro y en lo que se mueve (zoom): la textura se vuelve bloques. | Modo **Calidad** (por defecto) o **Máxima calidad**: más bitrate, VBR, keyframe cada 2 s y tope de cuantización. |
 | **Curva de tono del fabricante** | Las cámaras de celular usan una curva con mucho contraste que oscurece las sombras para que la foto "impacte". | Ajustes → Imagen → **Curva neutral sRGB** (sólo si el celular lo permite; la app lo detecta). |
 | **Exposición engañada** | Ventanas, focos o una pantalla brillante detrás del púlpito hacen que la cámara baje la exposición y la ropa oscura se hunde. | Ajustes → Imagen → **Exposición según el centro**. Y/o sube **EV** a +0,3 o +0,7 (se recuerda). Para que no "respire" cuando alguien de negro cruza: **mantén pulsado** sobre la cara de quien habla (bloquea exposición y enfoque). |
 | **Poca luz** | Con poca luz el sensor mete ruido; la reducción de ruido lo "barre" y se lleva la textura de la tela. | En calidad la app usa la reducción de ruido **de alta calidad** del celular y prefiere **30 fps** (60 fps deja la mitad de luz por cuadro). Lo que más ayuda de verdad: **una luz LED suave de frente** al púlpito. |
 | **Pérdidas en el WiFi** | Cada frame perdido obliga a pedir un keyframe, y durante un momento la imagen se ve más pobre. | En calidad el receptor espera hasta 0,3–0,8 s y vuelve a pedir los paquetes perdidos: con 6 % de pérdida simulada, **0 frames perdidos** (ver sección 7). |
-| **OBS** | "Bandwidth: Lowest" en la fuente NDI, o un bitrate de transmisión bajo en YouTube/Facebook. | Fuente NDI en **Highest**. Para transmitir: 1080p30 a **6000 kbps**, keyframe 2 s. Con x264 agrega en *Opciones x264*: `aq-mode=3` (cuida las escenas oscuras). Con NVENC: preset **P6 / Calidad**, *Tuning: High Quality*, *Multipass: Two passes (quarter)*, *Psycho Visual Tuning* activado. |
+| **OBS** | Una resolución de captura más baja que la del celular, o un bitrate de transmisión bajo en YouTube/Facebook. | En el «Dispositivo de captura de vídeo» elige *Personalizado* con la resolución del celular. Para transmitir: 1080p30 a **6000 kbps**, keyframe 2 s. Con x264 agrega en *Opciones x264*: `aq-mode=3` (cuida las escenas oscuras). Con NVENC: preset **P6 / Calidad**, *Tuning: High Quality*, *Multipass: Two passes (quarter)*, *Psycho Visual Tuning* activado. |
 
 ### 4K con varios celulares (lo que necesita el PC)
 
@@ -166,8 +179,9 @@ fluido depende del PC que recibe:
   `Decodificación: <GPU>: H.265 4K · H.264 4K`. Los celulares reciben ese dato y eligen solos el códec que la GPU
   decodifica (por ejemplo H.264 si la GPU no tiene H.265 en 4K).
 * Para **2–3 celulares en 4K** hace falta una GPU con decodificación H.265 4K: en general NVIDIA GTX 1050 o más nueva,
-  Intel de 7.ª generación o más nueva (gráficos HD 630 / UHD), AMD RX 400 o más nueva. Cada fuente 4K además pasa por
-  la compresión de NDI, que usa CPU: conviene un procesador de 6 núcleos o más si OBS corre en el mismo PC.
+  Intel de 7.ª generación o más nueva (gráficos HD 630 / UHD), AMD RX 400 o más nueva. Las cámaras para OBS no
+  vuelven a comprimir el video (a diferencia de NDI), así que el resto del trabajo es poco: copiar la imagen y, si
+  OBS pide 1080p de un celular 4K, reducirla (≈2–3 ms por imagen).
 * **Sin GPU compatible**, el receptor decodifica con **todos los núcleos** de la CPU. Un 4K puede andar bien;
   2–3 a la vez, difícilmente.
 * **Si el PC no alcanza**, el receptor nunca deja que el retraso crezca (salta frames viejos), lo avisa en la tarjeta
@@ -198,31 +212,66 @@ fluido depende del PC que recibe:
 3. Ajustes → Imagen: prueba **Curva neutral** y **Exposición según el centro**; compara en OBS con y sin.
 4. Antes de empezar: toca la cara de quien predica para enfocar, sube EV si la ropa oscura se ve hundida,
    y **mantén pulsado** para bloquear exposición y enfoque. Bloquea también **BB** (balance de blancos).
-5. En OBS: fuente NDI en **Bandwidth: Highest**, **YUV Range: Partial**, **BT.709**.
+5. En OBS: «Dispositivo de captura de vídeo» → «Cámara NDI - Celular N» en **Personalizado** con la resolución del
+   celular, **709** y **Parcial** (o "Predeterminado").
+
+### Mejora con IA (opcional, experimental)
+Casilla **"Mejora con IA de la GPU (NVIDIA RTX, experimental)"** en el receptor. Lo que hay que saber, sin vender humo:
+
+* La única IA que funciona **en tiempo real** en un PC normal para esto es **NVIDIA RTX Video Super Resolution**,
+  la misma que usan Chrome, Edge, Firefox, VLC y mpv. Necesita una **GeForce RTX** (serie 20, 30, 40 o 50) con
+  controlador 531 o más nuevo, y estar activada en la *NVIDIA App / Panel de control* → *Mejora de video RTX* →
+  **Súper resolución** (ahí se elige también el nivel de calidad 1–4).
+* **Sólo ayuda cuando la imagen se agranda** (por ejemplo celular en 1080p y OBS en 4K) o para limpiar un poco los
+  bloques de compresión. Si el celular ya manda la misma resolución que OBS usa, la IA no puede "inventar" más
+  nitidez real: la mejor calidad viene de la resolución del celular, la luz y el bitrate (sección 3b).
+* Cambia un poco el aspecto (más definido). Como pediste imagen natural, viene **apagada**: compárala con y sin.
+* El receptor **sólo dice "Activa"** cuando el controlador de NVIDIA confirma que la está aplicando a esa cámara
+  (la línea "IA:" de la tarjeta). Si está apagada en el panel, si la tarjeta no la aplica o si tarda más de medio
+  cuadro, lo explica ahí y usa el escalado normal. NVIDIA no documenta esta función para video que no se muestra
+  en pantalla, así que puede que en algunos PC nunca se active: no se pudo probar en una tarjeta RTX real.
+* Intel y AMD: no hay una IA equivalente que un programa pueda usar de forma fiable (la de Intel no se puede
+  comprobar y la de AMD no es IA), así que no se ofrece.
 
 ## 4. Receptor de Windows
 
 * Una tarjeta por celular: miniatura, estado (EN VIVO / En espera / Sin señal / Desconectado), video
   (resolución, fps, códec), bitrate, pérdida (antes y después de reenvíos), latencia estimada, decodificador
-  (GPU/CPU), conexiones NDI, temperatura/batería del celular y una línea **Prueba** (tiempo en vivo, fps
+  (GPU/CPU), temperatura/batería del celular y una línea **Prueba** (tiempo en vivo, fps
   promedio y mínimo, temperatura máxima, CPU de la app) y una línea **Color** (qué rango/matriz detectó y si
   convirtió), con el selector **Rango de entrada** (Automático / Completo / Limitado).
-* **Renombrar** (nombre NDI, se guarda por celular), **Pedir keyframe**, **Desconectar** (el celular pasa a
-  "En espera").
+* **"En OBS: Cámara NDI - Celular N"**: qué cámara usa ese celular (se puede cambiar; si otra estaba ocupada, se
+  intercambian) y si OBS la está usando ahora mismo. Cada celular conserva su cámara entre sesiones.
+* **Renombrar** (se guarda por celular; es el nombre que muestra el cartel de la cámara y la fuente NDI),
+  **Pedir keyframe**, **Desconectar** (el celular pasa a "En espera").
 * Opciones: buffer de red 30–1000 ms (si "usar el modo de cada celular" está marcado, lo elige cada celular), usar el modo de latencia de cada celular, decodificar con GPU/CPU,
-  **iniciar con Windows** (minimizado a la bandeja), **minimizar a la bandeja**.
-* Si el celular pierde la conexión, la fuente NDI **no desaparece** de OBS: cuando vuelve, sigue en la misma fuente.
+  **publicar también por NDI** (sólo para otro PC), **mejora con IA de la GPU** (ver arriba), **iniciar con Windows** (minimizado a la bandeja),
+  **minimizar a la bandeja**, **quitar cámaras de Windows** (por ejemplo antes de borrar la carpeta).
+* Si el celular pierde la conexión, la cámara **no desaparece** de OBS: muestra "Esperando video del celular…" y
+  cuando vuelve sigue en la misma fuente.
 * Registro: `%LOCALAPPDATA%\ReceptorCamaraNDI\logs\receptor-AAAAMMDD.log` (botón "Abrir registros").
 * Botón **"Reloj para medir latencia"** (ver sección 7).
 
+### Cámaras virtuales (cómo funcionan)
+* `camara-virtual\CamaraVirtual.dll` es un filtro **DirectShow** propio (C++, sin dependencias: no hace falta el
+  runtime de Visual C++). Windows la registra como 4 "dispositivos de captura de video". Cuando OBS abre una, la
+  DLL se carga **dentro de OBS** y lee las imágenes que deja el receptor en memoria compartida
+  (`Local\CamaraNDI_VCam_N`, 3 búferes con número de secuencia: nunca se lee una imagen a medio escribir).
+* Formatos que ofrece: NV12 3840x2160, 2560x1440, 1920x1080 (predeterminado), 1280x720; YUY2 y RGB32 en 1080p/720p;
+  de 5 a 60 fps. La cámara le avisa al receptor qué tamaño eligió OBS y el receptor se lo entrega ya en ese tamaño.
+* Si el receptor no está abierto, el celular no transmite o la imagen tiene más de 1,5 s, la cámara muestra un
+  cartel explicando qué falta (nunca una imagen congelada vieja).
+* Registro: primero sólo para tu usuario (sin pedir permiso); con el botón, para todo el PC (`regsvr32`, pide
+  administrador). A mano: `regsvr32 camara-virtual\CamaraVirtual.dll` (todo el PC) o
+  `regsvr32 /n /i:user camara-virtual\CamaraVirtual.dll` (sólo el usuario); para quitarlas, lo mismo con `/u`.
+
 ### DLLs y licencias
-* **NDI**: el receptor **no incluye** la librería NDI; carga `Processing.NDI.Lib.x64.dll` del *NDI Runtime*
-  instalado (busca en la carpeta del .exe, `ndi\`, `%NDI_RUNTIME_DIR_V6%`, `%NDI_RUNTIME_DIR_V5%` y las rutas
-  típicas de NDI Tools). Para llevarla junto al .exe: copia `Processing.NDI.Lib.x64.dll` desde el **NDI SDK**
-  (gratuito, <https://ndi.video/for-developers/ndi-sdk/>, carpeta `Bin\x64`) al lado del .exe. La licencia del SDK
-  permite redistribuir esa DLL con tu aplicación siempre que muestres el aviso de marca "NDI®", el enlace
-  <https://ndi.video> e incluyas su acuerdo de licencia. Para uso personal basta con NDI Tools.
-* **FFmpeg 6.1**: `ffmpeg\avcodec-60.dll`, `avutil-58.dll`, `swresample-4.dll` (paquete NuGet
+* **Cámaras virtuales**: `CamaraVirtual.dll` usa las *DirectShow BaseClasses* de Microsoft (licencia MIT, copia
+  tomada del proyecto *softcam*). Ver `LICENCIAS.txt`.
+* **NDI (opcional)**: el receptor **no incluye** la librería NDI. Sólo si marcas "Publicar también por NDI" carga
+  `Processing.NDI.Lib.x64.dll` del *NDI Runtime* instalado (busca en la carpeta del .exe, `ndi\`,
+  `%NDI_RUNTIME_DIR_V6%`, `%NDI_RUNTIME_DIR_V5%` y las rutas típicas de NDI Tools).
+* **FFmpeg 6.1**: `ffmpeg\avcodec-60.dll`, `avutil-58.dll`, `swresample-4.dll`, `swscale-7.dll` (paquete NuGet
   `Sdcb.FFmpeg.runtime.windows-x64`, compilación **GPL**). Para uso personal no hay problema; si vas a
   redistribuir, cámbialas por una compilación **LGPL** (p. ej. BtbN `win64-lgpl-shared-6.1`): mismos nombres,
   funciona igual. Detalles en `LICENCIAS.txt`.
@@ -240,18 +289,23 @@ El APK se firma con `android-app/keystore/camarandi.jks` (contraseña `camarandi
 las actualizaciones se instalen encima sin desinstalar. **No la uses para publicar en Play Store.**
 
 ### Receptor (.exe)
-Requisito: .NET 8 SDK (<https://dotnet.microsoft.com/download/dotnet/8.0>).
+Requisitos: .NET 8 SDK (<https://dotnet.microsoft.com/download/dotnet/8.0>) y, para las cámaras virtuales,
+Visual Studio 2022 con "Desarrollo para el escritorio con C++" (trae CMake).
 ```powershell
 cd windows-receiver
-.\publish.ps1          # o ./publish.sh
+.\publish.ps1          # compila CamaraVirtual.dll con CMake y publica el receptor
 # → publish\ReceptorCamaraNDI\ReceptorCamaraNDI.exe  y  publish\ReceptorCamaraNDI-win-x64.zip
 ```
+Sólo la cámara: `cmake -S virtualcam -B virtualcam/build -A x64` y `cmake --build virtualcam/build --config Release`.
+Prueba en Windows: `virtualcam\tools\ci-test.ps1 -Build virtualcam\build\Release` (la usa GitHub Actions).
 Pruebas: `dotnet test windows-receiver/tests/CamaraNdi.Tests` (las de punta a punta necesitan FFmpeg 6.1 en el sistema;
 en Linux: `apt install ffmpeg`).
 
 ### GitHub Actions
-`.github/workflows/compilar.yml` compila el APK y el receptor en cada push y los deja como *artifacts*
-(pestaña **Actions** → la ejecución → *Artifacts*: `CamaraNDI-apk` y `ReceptorCamaraNDI-win-x64`).
+`.github/workflows/compilar.yml` compila el APK, la cámara virtual y el receptor en cada push y los deja como
+*artifacts* (pestaña **Actions** → la ejecución → *Artifacts*: `CamaraNDI-apk` y `ReceptorCamaraNDI-win-x64`).
+En un Windows real registra las cámaras y las prueba: captura con DirectShow y con FFmpeg (como OBS) en 1080p, 4K y
+720p, NV12/YUY2/RGB32, sin receptor (cartel) y la cadena completa celular simulado → receptor → cámara.
 
 ### Probar sin celular
 `windows-receiver/tools/SimSender` es un "celular" simulado (FFmpeg + misma lógica de red):
@@ -290,8 +344,11 @@ celulares**. Lo que sí se probó de verdad:
 | 20 % de pérdida en ambos sentidos (720p40, modo mínima), PC que sí alcanza | Versión anterior: confundía la pérdida con "PC lento" y **pedía bajar la resolución**. Ahora: no la baja |
 | Decodificación por CPU con 4 hilos + jitter de red de 0–40 ms (modo Calidad) | Antes: salida a tirones (desviación 16 ms, 27 saltos de más de 50 ms). Ahora: **desviación 2,6 ms, ningún salto** |
 | "Detener" 1,2 s y volver a "Transmitir" en el celular | Antes: salían al aire imágenes de antes de la pausa (de hace 1,3 s). Ahora: la imagen más vieja tiene ≈0,2 s |
+| **Cámara virtual** (DLL compilada para Windows, probada con Wine): registro, lista de dispositivos, captura DirectShow | Aparecen las 4 cámaras; 1080p: 61 imágenes a 30,2 fps con contenido que cambia; 4K pedido por la aplicación: 3840x2160 a ~31 fps |
+| Receptor → memoria de la cámara (prueba de punta a punta con el celular simulado en 1080p y "OBS" pidiendo 720p) | 175 imágenes en 5,9 s, todas del tamaño pedido; 4K → 1080p se reduce en ~2,5 ms |
+| En **Windows real** (GitHub Actions, en cada versión) | Registro para todo el PC y por usuario, captura con DirectShow y con FFmpeg (como OBS) en 1080p/4K/720p y NV12/YUY2/RGB32, cartel sin receptor, y celular simulado → receptor → cámara. Si algo falla, no se publica la versión. |
 
-No se pudo probar aquí: cámara real, codificador por hardware, NDI en Windows, D3D11VA y la interfaz WPF/Android en pantalla.
+No se pudo probar aquí: cámara real del celular, codificador por hardware, OBS en Windows (sí FFmpeg/DirectShow), D3D11VA y la interfaz WPF/Android en pantalla.
 
 ### Para llenar con los celulares (método)
 
@@ -302,7 +359,7 @@ No se pudo probar aquí: cámara real, codificador por hardware, NDI en Windows,
 | Ambos a la vez | | | | | |
 
 * **Latencia (cristal a cristal)**: en el receptor pulsa **"Reloj para medir latencia"**. Apunta el celular a
-  ese reloj y pon la fuente NDI de OBS en la misma pantalla. Captura de pantalla (Win+Shift+S): reloj real menos
+  ese reloj y pon la fuente «Cámara NDI - Celular 1» de OBS en la misma pantalla. Captura de pantalla (Win+Shift+S): reloj real menos
   reloj visto en OBS = latencia total. 5 capturas, promedio.
 * **CPU, temperatura y fps**: deja transmitiendo 30 min (con cargador). La línea **Prueba** de cada tarjeta del
   receptor muestra tiempo en vivo, fps promedio y mínimo, temperatura máxima de batería y CPU de la app
@@ -313,16 +370,19 @@ No se pudo probar aquí: cámara real, codificador por hardware, NDI en Windows,
 | Síntoma | Qué hacer |
 |---|---|
 | El celular dice "Buscando receptor…" | Firewall (`abrir-firewall.bat`), red privada, mismo WiFi, sin aislamiento de clientes. Escribe la IP que muestra el receptor. |
-| "✖ No se encontró NDI Runtime" en el receptor | Instala NDI Tools y reinicia el receptor. |
+| En OBS no aparece «Cámara NDI - Celular 1» | Abre el receptor y mira la línea de las cámaras arriba. Si dice "¿No aparecen en OBS?" o "hay que instalar las cámaras", pulsa el botón y acepta el permiso. Luego cierra y abre OBS. Pasa si OBS se abre "como administrador" o si moviste la carpeta del receptor. |
+| La cámara en OBS muestra "Abre el Receptor Cámara NDI en este PC" | El receptor está cerrado: ábrelo. |
+| La cámara muestra "Sin celular…" o "Esperando video del celular…" | Ningún celular está transmitiendo a esa cámara: pulsa Transmitir en el celular y mira en su tarjeta del receptor qué cámara le tocó ("En OBS: …"). |
+| Se ve borroso en OBS con un celular 4K | En la fuente pon *Personalizado* → **3840x2160**. Con "Predeterminado del dispositivo" OBS pide 1080p. |
+| "NDI: no instalado" en el receptor | Es normal: NDI ya no hace falta. Sólo se usa si marcas "Publicar también por NDI" (para otro PC). |
 | Tirones | Modo "Calidad" o "Máxima calidad" (buffer grande), 5 GHz, PC por cable. Mira "Pérdida" en la tarjeta. |
 | El celular quedó en menos resolución ("Este PC no alcanzaba …") | El PC no alcanzó a decodificar. Si fue algo pasajero, pulsa **"Quitar límite"** en la tarjeta (o elige la resolución a mano en el celular). Si vuelve a pasar, el PC no da para esa resolución con tantos celulares: mira la línea "Decodificación" (GPU) arriba. |
 | Salida a 1 fps y varios segundos de retraso | Era la versión 1.0.5 con un 4K que la GPU no decodificaba (quedaba en CPU con un solo hilo). Desde la 1.0.6 se usan todos los núcleos, se prueba la GPU al abrir y el retraso nunca se acumula. Mira la línea "Decodificación" arriba y el aviso naranja en la tarjeta. |
-| Negros aplastados / ropa oscura como una mancha | Ver sección 3b: mira la línea **Color** de la tarjeta, prueba "Curva neutral", "Exposición según el centro", EV +0,3 y revisa la fuente NDI de OBS (Highest, Partial, BT.709). |
-| Negros grises / imagen lavada | En OBS la fuente NDI debe estar en "YUV Range: Partial". Si ya lo está, en el receptor pon "Rango de entrada: Limitado". |
+| Negros aplastados / ropa oscura como una mancha | Ver sección 3b: mira la línea **Color** de la tarjeta, prueba "Curva neutral", "Exposición según el centro", EV +0,3 y revisa la fuente de OBS (*Rango de color:* Parcial o Predeterminado, *Espacio de color:* 709 o Predeterminado). |
+| Negros grises / imagen lavada | En OBS la fuente debe estar en *Rango de color: Parcial* (o Predeterminado), no "Completo". Si ya lo está, en el receptor pon "Rango de entrada: Limitado". |
 | Se corta con la pantalla apagada | Permiso "sin restricciones de batería" (Ajustes de la app) y los pasos de Samsung/Infinix de arriba. |
 | Imagen invertida | Algunos sensores van montados al revés; la app gira la orientación sola según el sensor. Si aún así, avísalo con el modelo. |
 | Celular caliente (indicador rojo) | Quita la funda, ventílalo; la app ya bajó bitrate/fps. |
 
 ## 9. Fase 2 (pendiente)
-* Salida como **cámara virtual** propia del receptor (hoy: usar la cámara virtual de OBS).
 * Audio del celular.

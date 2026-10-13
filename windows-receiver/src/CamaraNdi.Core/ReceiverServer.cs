@@ -1,5 +1,7 @@
 using System.Net;
 using System.Net.Sockets;
+using System.Runtime.InteropServices;
+using CamaraNdi.Core.VirtualCam;
 
 namespace CamaraNdi.Core;
 
@@ -24,12 +26,25 @@ public sealed class ReceiverServer : IDisposable
     public event Action<PhoneSession>? SessionRemoved;
     /// <summary>Se disparó cuando un celular fue rechazado (p. ej. receptor lleno).</summary>
     public event Action<string>? Notice;
+    /// <summary>Cambió algo de la configuración que conviene guardar (p. ej. qué cámara usa cada celular).</summary>
+    public event Action? SettingsChanged;
 
     public int MediaPort { get; }
 
-    public ReceiverServer(ReceiverSettings settings)
+    /// <summary>Cámaras virtuales para OBS (null si están apagadas o no es Windows).</summary>
+    public VirtualCamHub? VirtualCams { get; }
+    private readonly bool _timerPeriod;
+
+    /// <param name="virtualCams">Para pruebas: un hub propio (si no, el de este PC cuando está activado).</param>
+    public ReceiverServer(ReceiverSettings settings, VirtualCamHub? virtualCams = null)
     {
         _settings = settings;
+        VirtualCams = virtualCams ?? (settings.VirtualCameras ? VirtualCamHub.CreateForThisPc() : null);
+        if (OperatingSystem.IsWindows())
+        {
+            // Sin esto Windows despierta los hilos cada ~15 ms: la salida de imágenes iría a saltitos.
+            try { _timerPeriod = timeBeginPeriod(1) == 0; } catch { }
+        }
         // Probar en segundo plano qué decodifica la GPU (los celulares lo reciben en HELLO_ACK).
         Decoding.DecoderProbe.StartAsync();
         _media = CreateUdp(settings.MediaPort, 8 * 1024 * 1024);
@@ -169,20 +184,101 @@ public sealed class ReceiverServer : IDisposable
                 s = new PhoneSession(hello.DeviceId, _settings, Send);
                 _byDevice[hello.DeviceId] = s;
                 added = true;
-                Log.Info($"Nuevo celular: {hello.Name} / {hello.Model} ({from}) id={hello.DeviceId}");
+                AttachCameraLocked(s);
+                Log.Info($"Nuevo celular: {hello.Name} / {hello.Model} ({from}) id={hello.DeviceId}" +
+                         (s.CameraIndex > 0 ? $" → {VCamLayout.CameraName(s.CameraIndex)}" : ""));
             }
             // Una sesión nueva del mismo celular (la app se reinició) reemplaza a la vieja.
             foreach (var kv in _bySession.Where(kv => kv.Value == s && kv.Key != sid).ToList()) _bySession.Remove(kv.Key);
             _bySession[sid] = s;
         }
         s.OnHello(hello, sid, from, now);
-        if (added) SessionAdded?.Invoke(s);
+        if (added)
+        {
+            SessionAdded?.Invoke(s);
+            if (s.CameraIndex > 0) SettingsChanged?.Invoke();
+        }
+    }
+
+    // ---------------- Cámaras virtuales ----------------
+
+    /// <summary>Le da al celular su cámara (la de siempre si está libre; si no, la primera libre).</summary>
+    private void AttachCameraLocked(PhoneSession s)
+    {
+        if (VirtualCams == null) return;
+        var used = _byDevice.Values.Where(x => x != s).Select(x => x.CameraIndex).Where(i => i > 0).ToHashSet();
+        int index = 0;
+        if (_settings.CameraSlots.TryGetValue(s.DeviceId, out int pref) && pref >= 1 && pref <= VCamLayout.CameraCount && !used.Contains(pref))
+            index = pref;
+        if (index == 0)
+        {
+            // Primero las que no "pertenecen" a otro celular conocido, para que cada uno conserve la suya.
+            var reserved = _settings.CameraSlots.Where(kv => kv.Key != s.DeviceId).Select(kv => kv.Value).ToHashSet();
+            for (int i = 1; i <= VCamLayout.CameraCount && index == 0; i++)
+                if (!used.Contains(i) && !reserved.Contains(i)) index = i;
+            for (int i = 1; i <= VCamLayout.CameraCount && index == 0; i++)
+                if (!used.Contains(i)) index = i;
+        }
+        if (index == 0)
+        {
+            Log.Warn($"{s.DeviceId}: no quedan cámaras virtuales libres ({VCamLayout.CameraCount})");
+            return;
+        }
+        _settings.CameraSlots[s.DeviceId] = index;
+        s.CameraIndex = index;
+        s.VirtualCam = VirtualCams.Writer(index);
+    }
+
+    /// <summary>El usuario eligió otra cámara para este celular: si la usaba otro, se intercambian.</summary>
+    public void SetCamera(PhoneSession s, int index)
+    {
+        if (VirtualCams == null || index < 1 || index > VCamLayout.CameraCount || s.CameraIndex == index) return;
+        lock (_gate)
+        {
+            var other = _byDevice.Values.FirstOrDefault(x => x != s && x.CameraIndex == index);
+            int old = s.CameraIndex;
+            if (other != null)
+            {
+                other.CameraIndex = old;
+                other.VirtualCam = old > 0 ? VirtualCams.Writer(old) : null;
+                if (old > 0) _settings.CameraSlots[other.DeviceId] = old;
+                else _settings.CameraSlots.Remove(other.DeviceId);
+            }
+            s.CameraIndex = index;
+            s.VirtualCam = VirtualCams.Writer(index);
+            _settings.CameraSlots[s.DeviceId] = index;
+        }
+        Log.Info($"{s.NdiName}: ahora es \"{VCamLayout.CameraName(index)}\"");
+        UpdateCameras();
+        SettingsChanged?.Invoke();
+    }
+
+    /// <summary>Latido del receptor y cartel de cada cámara (nombre del celular, en vivo o esperando).</summary>
+    private void UpdateCameras()
+    {
+        var hub = VirtualCams;
+        if (hub == null) return;
+        List<PhoneSession> all;
+        lock (_gate) all = _byDevice.Values.ToList();
+        for (int i = 1; i <= VCamLayout.CameraCount; i++)
+        {
+            var s = all.FirstOrDefault(x => x.CameraIndex == i);
+            if (s == null)
+            {
+                hub.SetCamera(i, VCamLayout.StateEmpty, "");
+                continue;
+            }
+            var snap = s.Snapshot;
+            hub.SetCamera(i, snap.State == SessionState.EnVivo ? VCamLayout.StateLive : VCamLayout.StateWaiting, snap.NdiName);
+        }
+        hub.Heartbeat();
     }
 
     /// <summary>Desconecta y elimina un celular (botón "Desconectar").</summary>
     public void Remove(PhoneSession s, bool notifyPhone = true)
     {
         if (notifyPhone) s.SendDisconnect();
+        s.VirtualCam = null;
         lock (_gate)
         {
             _byDevice.Remove(s.DeviceId);
@@ -226,6 +322,8 @@ public sealed class ReceiverServer : IDisposable
     {
         while (_running)
         {
+            try { UpdateCameras(); }
+            catch (Exception ex) { Log.Error("Error actualizando las cámaras virtuales", ex); }
             Thread.Sleep(1000);
             long now = Clock.NowMs;
             foreach (var kv in _recentlyRemoved)
@@ -265,5 +363,13 @@ public sealed class ReceiverServer : IDisposable
         foreach (var s in all) s.Dispose();
         try { _media.Close(); } catch { }
         try { _discovery.Close(); } catch { }
+        try { VirtualCams?.Dispose(); } catch { }
+        if (_timerPeriod) try { timeEndPeriod(1); } catch { }
     }
+
+    [DllImport("winmm.dll")]
+    private static extern uint timeBeginPeriod(uint period);
+
+    [DllImport("winmm.dll")]
+    private static extern uint timeEndPeriod(uint period);
 }

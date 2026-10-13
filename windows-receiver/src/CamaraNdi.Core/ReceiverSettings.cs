@@ -22,6 +22,20 @@ public sealed class ReceiverSettings
     public Dictionary<string, string> Names { get; set; } = new();
     /// <summary>Rango de color de entrada por deviceId: "auto", "full" o "limited".</summary>
     public Dictionary<string, string> RangeOverrides { get; set; } = new();
+    /// <summary>
+    /// Cámaras virtuales para OBS ("Cámara NDI - Celular 1..4", como DroidCam): el camino principal,
+    /// no necesita NDI ni plugins.
+    /// </summary>
+    public bool VirtualCameras { get; set; } = true;
+    /// <summary>Qué cámara virtual (1..4) usa cada celular (deviceId), para que no cambie entre sesiones.</summary>
+    public Dictionary<string, int> CameraSlots { get; set; } = new();
+    /// <summary>Publicar también por NDI (sólo si el NDI Runtime está instalado; sirve para mandar a otro PC).</summary>
+    public bool NdiOutput { get; set; }
+    /// <summary>
+    /// Mejora con IA de la GPU (NVIDIA RTX Video Super Resolution) para lo que va a las cámaras virtuales.
+    /// Experimental y apagada por defecto: sólo actúa si el controlador confirma que la aplica.
+    /// </summary>
+    public bool AiEnhance { get; set; }
 
     /// <summary>
     /// Cuánto se espera a un paquete perdido antes de dar el frame por perdido.

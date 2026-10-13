@@ -1,6 +1,7 @@
 using System.Net;
 using CamaraNdi.Core.Decoding;
 using CamaraNdi.Core.Ndi;
+using CamaraNdi.Core.VirtualCam;
 
 namespace CamaraNdi.Core;
 
@@ -51,7 +52,9 @@ public sealed record SessionSnapshot(
     string ColorInfo,
     string RangeMode,
     string Warning,
-    string LimitInfo);
+    string LimitInfo,
+    int Camera,
+    bool CameraInUse);
 
 /// <summary>
 /// Un celular conectado: jitter buffer + decodificador + fuente NDI, en su propio hilo.
@@ -77,6 +80,17 @@ public sealed class PhoneSession : IDisposable
 
     /// <summary>Sólo para pruebas: ve cada imagen justo antes de enviarla a NDI.</summary>
     public Action<VideoBuffer>? FrameTap { get; set; }
+
+    /// <summary>Cámara virtual ("Cámara NDI - Celular N") de este celular; null si no tiene.</summary>
+    public VirtualCamWriter? VirtualCam
+    {
+        get => Volatile.Read(ref _vcam);
+        set => Volatile.Write(ref _vcam, value);
+    }
+    private VirtualCamWriter? _vcam;
+    private bool _vcamErrorLogged;
+    /// <summary>Número de la cámara virtual (1..4), 0 = ninguna.</summary>
+    public int CameraIndex { get; set; }
     /// <summary>Sólo para pruebas: retraso artificial por frame decodificado (simula un PC lento).</summary>
     public int TestDecodeDelayMs { get; set; }
 
@@ -755,9 +769,18 @@ public sealed class PhoneSession : IDisposable
 
         int fps;
         lock (_gate) fps = _hello.Fps > 0 ? _hello.Fps : 30;
-        if (_ndi == null && (!_ndiAttempted || (NdiLib.IsLoaded && !_ndiWasLoadedAtAttempt)))
+        if (!_settings.NdiOutput)
         {
-            // También se reintenta si NDI se instaló/cargó después de conectarse el celular.
+            if (_ndi != null)
+            {
+                _ndi.Dispose();
+                _ndi = null;
+            }
+            _ndiAttempted = false;
+        }
+        else if (_ndi == null && (!_ndiAttempted || (NdiLib.IsLoaded && !_ndiWasLoadedAtAttempt)))
+        {
+            // NDI es opcional (para mandar a otro PC). También se reintenta si se instaló después.
             _ndiAttempted = true;
             _ndiWasLoadedAtAttempt = NdiLib.IsLoaded;
             _ndi = NdiSender.TryCreate(NdiName);
@@ -765,6 +788,22 @@ public sealed class PhoneSession : IDisposable
 
         MaybeThumbnail(buf, now);
         FrameTap?.Invoke(buf);
+
+        // Camino principal hacia OBS: la cámara virtual (copia directa, sin volver a comprimir).
+        var vcam = VirtualCam;
+        if (vcam != null)
+        {
+            try
+            {
+                vcam.Enhance = _settings.AiEnhance;
+                vcam.Submit(buf); // copia y sigue: el escalado va en el hilo de la cámara
+            }
+            catch (Exception ex)
+            {
+                if (!_vcamErrorLogged) Log.Error($"{DeviceId}: no se pudo escribir en la cámara virtual", ex);
+                _vcamErrorLogged = true;
+            }
+        }
 
         VideoBuffer? released = _ndi != null ? _ndi.Send(buf, fps, 1) : buf;
         _framesOutput++;
@@ -779,6 +818,8 @@ public sealed class PhoneSession : IDisposable
     private void RecreateNdi(string name)
     {
         _ndi?.Dispose();
+        _ndi = null;
+        if (!_settings.NdiOutput) return;
         _ndi = NdiSender.TryCreate(name);
         _ndiAttempted = true;
     }
@@ -999,7 +1040,9 @@ public sealed class PhoneSession : IDisposable
             _colorInfo,
             RangeOverride,
             warning,
-            limitInfo);
+            limitInfo,
+            CameraIndex,
+            VirtualCam?.ConsumerActive() == true);
     }
 
     public void Dispose()

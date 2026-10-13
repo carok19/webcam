@@ -5,6 +5,7 @@ obj/
 .vs/
 windows-receiver/publish/
 windows-receiver/dist/
+windows-receiver/virtualcam/build*/
 # Android / Gradle
 .gradle/
 android-app/build/

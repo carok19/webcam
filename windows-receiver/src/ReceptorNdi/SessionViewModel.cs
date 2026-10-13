@@ -50,6 +50,26 @@ public sealed class SessionViewModel : INotifyPropertyChanged
 
     /// <summary>Se llama cuando el usuario cambia algo que hay que guardar.</summary>
     public static Action? SaveRequested;
+    /// <summary>El usuario eligió otra cámara virtual para este celular (1..4).</summary>
+    public static Action<PhoneSession, int>? CameraChangeRequested;
+
+    public Visibility CameraVisibility { get; private set; } = Visibility.Collapsed;
+    public string CameraUseText { get; private set; } = "";
+    public string EnhanceText { get; private set; } = "";
+    public Brush EnhanceBrush { get; private set; } = Brushes.Gray;
+    public Visibility EnhanceVisibility { get; private set; } = Visibility.Collapsed;
+    public Brush CameraUseBrush { get; private set; } = OkText;
+
+    /// <summary>0..3 = "Cámara NDI - Celular 1..4" (-1 = sin cámara).</summary>
+    public int CameraChoice
+    {
+        get => Session.CameraIndex - 1;
+        set
+        {
+            if (value < 0 || value + 1 == Session.CameraIndex) return;
+            CameraChangeRequested?.Invoke(Session, value + 1);
+        }
+    }
 
     private static readonly string[] RangeModes = { "auto", "full", "limited" };
 
@@ -86,6 +106,12 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         Warning = x.Warning;
         WarningVisibility = string.IsNullOrEmpty(x.Warning) ? Visibility.Collapsed : Visibility.Visible;
         LimitVisibility = string.IsNullOrEmpty(x.LimitInfo) ? Visibility.Collapsed : Visibility.Visible;
+        CameraVisibility = x.Camera > 0 ? Visibility.Visible : Visibility.Collapsed;
+        (CameraUseText, CameraUseBrush) = x.CameraInUse ? ("OBS la está usando", (Brush)OkThermal) : ("(OBS todavía no la abrió)", MidText);
+        var vc = Session.VirtualCam;
+        EnhanceText = vc?.EnhanceStatus is { Length: > 0 } et ? "IA: " + et : "";
+        EnhanceBrush = vc?.EnhanceActive == true ? OkThermal : MidText;
+        EnhanceVisibility = EnhanceText.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
         Video = x.Width > 0 ? $"{Label(x.Width, x.Height)}{x.Fps} {x.Codec}  ·  salida {x.OutputFps:F0} fps" : "-";
         Bitrate = $"{x.RxMbps:F1} Mbps recibidos (celular {x.PhoneBitrateKbps / 1000.0:F1})";
         Loss = $"{x.LossPct:F1} % (no recuperado {x.LostPct:F2} %)  ·  descartados {x.FramesDropped}";

@@ -4,19 +4,29 @@ LICENCIAS DE TERCEROS
 FFmpeg 6.1 (carpeta ffmpeg/)
   Compilación "Sdcb.FFmpeg.runtime.windows-x64" 6.1.0 (licencia GPL-3.0).
   Código fuente: https://ffmpeg.org  —  https://github.com/sdcb/FFmpeg.AutoGen
-  Puedes reemplazar las 3 DLL por una compilación LGPL equivalente (por ejemplo
+  Puedes reemplazar las 4 DLL por una compilación LGPL equivalente (por ejemplo
   "ffmpeg-n6.1-latest-win64-lgpl-shared-6.1" de https://github.com/BtbN/FFmpeg-Builds):
-  avcodec-60.dll, avutil-58.dll y swresample-4.dll. El receptor funciona igual.
+  avcodec-60.dll, avutil-58.dll, swresample-4.dll y swscale-7.dll. El receptor funciona igual.
   Si vas a REDISTRIBUIR este programa (no sólo usarlo tú), usa la compilación LGPL.
 
 FFmpeg.AutoGen 6.1 — LGPL-3.0 — https://github.com/Ruslan-B/FFmpeg.AutoGen
 
-NDI®
+Cámaras virtuales (carpeta camara-virtual/)
+  CamaraVirtual.dll incluye las "DirectShow BaseClasses" de Microsoft (Windows SDK samples),
+  licencia MIT. Copyright (c) Microsoft Corporation. Copia tomada del proyecto softcam
+  (https://github.com/tshino/softcam, MIT). Se permite usar, copiar, modificar y distribuir
+  siempre que se incluya este aviso de copyright y de permiso.
+
+Vortice.Windows (Direct3D 11 desde .NET, mejora opcional con IA) — MIT — https://github.com/amerkoleci/Vortice.Windows
+SharpGen.Runtime — MIT — https://github.com/SharpGenTools/SharpGenTools
+
+NDI® (opcional)
   NDI® es una marca registrada de Vizrt NDI AB. https://ndi.video
-  Este programa NO incluye la librería NDI: usa el "NDI Runtime" que el usuario instala
-  (NDI Tools o DistroAV). Si quieres incluirla junto al .exe, copia
-  Processing.NDI.Lib.x64.dll desde el NDI SDK (gratuito, https://ndi.video/for-developers/ndi-sdk/)
-  y respeta su licencia: debes mostrar el aviso de marca "NDI®" y el enlace https://ndi.video,
-  e incluir el archivo de licencia del SDK (NDI SDK License Agreement).
+  Este programa NO incluye la librería NDI. Sólo si se marca "Publicar también por NDI"
+  usa el "NDI Runtime" que el usuario instala (NDI Tools o DistroAV).
+
+NVIDIA RTX Video Super Resolution (opcional)
+  Es una función del controlador de NVIDIA instalado en el PC; este programa no incluye
+  ningún componente de NVIDIA. NVIDIA y RTX son marcas de NVIDIA Corporation.
 
 .NET 8 (incluido en el .exe) — MIT — https://dotnet.microsoft.com

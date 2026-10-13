@@ -16,11 +16,12 @@
             <TextBlock Text="Receptor Cámara NDI" FontSize="22" FontWeight="SemiBold"/>
             <TextBlock x:Name="StatusText" Foreground="{StaticResource FgDim}" Margin="0,4,0,0" TextWrapping="Wrap"/>
             <TextBlock x:Name="GpuText" Foreground="{StaticResource FgDim}" Margin="0,2,0,0" TextWrapping="Wrap"/>
-            <StackPanel x:Name="NdiMissingPanel" Orientation="Horizontal" Margin="0,6,0,0" Visibility="Collapsed">
-                <TextBlock Text="Sin NDI Runtime, OBS no puede ver los celulares." Foreground="#FFD180" VerticalAlignment="Center" Margin="0,0,10,0"/>
-                <Button Content="Descargar NDI Tools" Click="OnDownloadNdi" Background="#2D5BB8"/>
-                <TextBlock Text="(después de instalarlo, el receptor lo detecta solo)" Foreground="{StaticResource FgDim}" VerticalAlignment="Center"/>
-            </StackPanel>
+            <TextBlock x:Name="CamStatusText" Margin="0,4,0,0" TextWrapping="Wrap"/>
+            <WrapPanel x:Name="VCamPanel" Margin="0,6,0,0" Visibility="Collapsed">
+                <TextBlock x:Name="VCamPanelText" Foreground="#FFD180" VerticalAlignment="Center" Margin="0,0,10,0"/>
+                <Button x:Name="InstallCamsButton" Click="OnInstallCameras" Background="#2D5BB8"/>
+                <TextBlock Text="(Windows pedirá permiso de administrador una sola vez)" Foreground="{StaticResource FgDim}" VerticalAlignment="Center"/>
+            </WrapPanel>
             <TextBlock x:Name="ErrorText" Foreground="#FF8A80" Margin="0,4,0,0" TextWrapping="Wrap" Visibility="Collapsed"/>
         </StackPanel>
 
@@ -45,9 +46,15 @@
                 </StackPanel>
                 <CheckBox x:Name="AutoLower" Content="Bajar resolución si este PC no alcanza" Click="OnOptionChanged"
                           ToolTip="Si el PC no logra decodificar a tiempo (por ejemplo 4K sin GPU compatible), le pide al celular menos resolución para que la imagen siga fluida. Si lo desmarcas, sólo avisa."/>
+                <CheckBox x:Name="NdiOutput" Content="Publicar también por NDI" Click="OnOptionChanged"
+                          ToolTip="No hace falta para OBS en este PC (usa las cámaras virtuales). Sirve para mandar los celulares a OTRO PC por la red; necesita NDI Runtime (https://ndi.video/)."/>
+                <CheckBox x:Name="AiEnhance" Content="Mejora con IA de la GPU (NVIDIA RTX, experimental)" Click="OnOptionChanged"
+                          ToolTip="Usa «RTX Video Super Resolution» de las tarjetas NVIDIA GeForce RTX para lo que va a OBS. Sirve sobre todo cuando OBS pide más resolución que la del celular (por ejemplo celular en 1080p y OBS en 4K). Cambia un poco el aspecto (más definido): compara con y sin. En la tarjeta de cada celular se ve si de verdad está activa; si no se puede, se usa el escalado normal."/>
                 <CheckBox x:Name="StartWithWindows" Content="Iniciar con Windows" Click="OnOptionChanged"/>
                 <CheckBox x:Name="MinimizeToTray" Content="Minimizar a la bandeja" Click="OnOptionChanged"/>
                 <Button Content="Abrir registros" Click="OnOpenLogs"/>
+                <Button x:Name="UninstallCamsButton" Content="Quitar cámaras de Windows" Click="OnUninstallCameras"
+                        ToolTip="Borra «Cámara NDI - Celular 1..4» de Windows (por ejemplo antes de borrar esta carpeta). Al abrir de nuevo el receptor se vuelven a instalar."/>
                 <Button Content="Reloj para medir latencia" Click="OnLatencyClock"/>
             </WrapPanel>
         </Border>
@@ -82,6 +89,20 @@
                                     <TextBlock Text="{Binding Model}" Foreground="{StaticResource FgDim}" FontSize="11"/>
                                     <TextBlock Text="{Binding Warning}" Foreground="#FFB74D" FontSize="12" TextWrapping="Wrap" Margin="0,6,0,0"
                                                Visibility="{Binding WarningVisibility}"/>
+                                    <StackPanel Orientation="Horizontal" Margin="0,8,0,0" Visibility="{Binding CameraVisibility}">
+                                        <TextBlock Text="En OBS:" Foreground="{StaticResource FgDim}" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                                        <ComboBox Width="190" FontSize="12" SelectedIndex="{Binding CameraChoice, Mode=TwoWay}"
+                                                  ToolTip="En OBS: + (Fuentes) → Dispositivo de captura de vídeo → elige esta cámara. Cada celular conserva la suya.">
+                                            <ComboBoxItem Content="Cámara NDI - Celular 1"/>
+                                            <ComboBoxItem Content="Cámara NDI - Celular 2"/>
+                                            <ComboBoxItem Content="Cámara NDI - Celular 3"/>
+                                            <ComboBoxItem Content="Cámara NDI - Celular 4"/>
+                                        </ComboBox>
+                                        <TextBlock Text="{Binding CameraUseText}" Foreground="{Binding CameraUseBrush}" FontSize="11"
+                                                   VerticalAlignment="Center" Margin="8,0,0,0"/>
+                                    </StackPanel>
+                                    <TextBlock Text="{Binding EnhanceText}" Foreground="{Binding EnhanceBrush}" FontSize="11" TextWrapping="Wrap"
+                                               Margin="0,4,0,0" Visibility="{Binding EnhanceVisibility}"/>
                                     <Button Content="Quitar límite (volver a la máxima resolución)" Click="OnClearLimit" Tag="{Binding}"
                                             HorizontalAlignment="Left" Margin="0,6,0,0" Padding="10,4" FontSize="11"
                                             Visibility="{Binding LimitVisibility}"
