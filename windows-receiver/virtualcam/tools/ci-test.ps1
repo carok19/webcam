@@ -102,7 +102,10 @@ if ($ffmpeg) {
     $devs = & $ffmpeg -hide_banner -list_devices true -f dshow -i dummy 2>&1 | Out-String
     Write-Host $devs
     Check "FFmpeg ve las cámaras" ($devs -match 'Celular 1' -and $devs -match 'Celular 4') "lista de dispositivos dshow"
-    if ($feed.HasExited) { $feed = StartFeed 1 40 }
+    # Feed nuevo (el anterior pudo terminar mientras se instalaba FFmpeg).
+    if (-not $feed.HasExited) { Stop-Process -Id $feed.Id -Force -ErrorAction SilentlyContinue }
+    $feed = StartFeed 1 40
+    Start-Sleep -Seconds 1
     $c = FfCapture $cam1 "1920x1080" "nv12" 4 "nv12-1080"
     Check "FFmpeg 1080p NV12" ($c.Code -eq 0 -and $c.Frames -ge 90 -and $c.Distinct -ge 30 -and $c.Bytes -eq 3110400) "$($c.Frames) imágenes, $($c.Distinct) distintas, $($c.Bytes) bytes"
     $c = FfCapture $cam1 "3840x2160" "nv12" 3 "nv12-4k"
@@ -156,7 +159,13 @@ if ($SimBin) {
 if ($SimBin) {
     $probe = & dotnet $sim --probe-gpu 2>&1 | Out-String
     Write-Host $probe
-    Check "Procesador de video D3D11 (camino de la mejora con IA)" ($probe -match '-> OK') (($probe -split "`n" | Select-String "PROCESADOR") -join " ") -Info
+    $line = (($probe -split "`n" | Select-String "PROCESADOR") -join " ")
+    if ($probe -match 'procesado=') {
+        # Si la GPU (aunque sea de software) tiene procesador de video, el resultado tiene que ser correcto.
+        Check "Procesador de video D3D11 (camino de la mejora con IA)" ($probe -match '-> OK') $line
+    } else {
+        Check "Procesador de video D3D11 (camino de la mejora con IA)" $false $line -Info
+    }
 }
 
 # ---------------------------------------------------------------- 6. Registro sólo para el usuario (informativo)

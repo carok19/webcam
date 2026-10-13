@@ -46,6 +46,7 @@ private:
     VCamHeader* m_header = nullptr;
     uint8_t* m_data = nullptr;
     bool m_writable = false;
+    uint32_t m_token = 0;  // identifica a este lector (puede haber dos en el mismo proceso: dos fuentes en OBS)
     uint64_t m_lastOpenTryMs = 0;
 };
 

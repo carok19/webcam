@@ -52,12 +52,27 @@ public sealed unsafe class WindowsSharedRegion : ISharedRegion
     public long Length { get; }
     public bool Existed { get; }
 
+    private static string UserSid()
+    {
+        try
+        {
+            if (OperatingSystem.IsWindows())
+                return System.Security.Principal.WindowsIdentity.GetCurrent().User?.Value ?? "OW";
+        }
+        catch
+        {
+        }
+        return "OW"; // dueño del objeto
+    }
+
     public static WindowsSharedRegion Create(string name, long length)
     {
         if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException("Memoria compartida con nombre: sólo Windows");
         IntPtr sd = IntPtr.Zero;
-        // Todos pueden leer/escribir (mismo usuario con o sin administrador) y nivel de integridad bajo.
-        const string sddl = "D:(A;;GA;;;WD)(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;AC)S:(ML;;NW;;;LW)";
+        // Sólo este usuario de Windows (con o sin administrador: OBS puede abrirse "como administrador"),
+        // el sistema y los administradores. Nivel de integridad medio, para que un OBS normal pueda escribir el
+        // tamaño que pide aunque el receptor se haya abierto como administrador.
+        string sddl = $"D:(A;;GA;;;{UserSid()})(A;;GA;;;SY)(A;;GA;;;BA)S:(ML;;NW;;;ME)";
         if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, 1, out sd, IntPtr.Zero)) sd = IntPtr.Zero;
         try
         {

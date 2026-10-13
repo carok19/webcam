@@ -9,6 +9,10 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # Sin dependencia del runtime de Visual C++ (así no hay que instalar nada en el PC de la iglesia).
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+# Fuentes en UTF-8: los nombres "Cámara NDI - …" llevan tilde (sin esto MSVC las lee como cp1252).
+if(MSVC)
+    add_compile_options(/utf-8)
+endif()
 
 add_library(baseclasses STATIC
     baseclasses/amfilter.cpp
@@ -37,9 +41,11 @@ add_library(CamaraVirtual SHARED
     src/CamaraVirtual.def
 )
 target_include_directories(CamaraVirtual PRIVATE src)
+# std::min/std::max (las BaseClasses sí usan las macros min/max de windows.h, por eso sólo aquí).
+target_compile_definitions(CamaraVirtual PRIVATE NOMINMAX)
 target_link_libraries(CamaraVirtual PRIVATE baseclasses strmiids winmm gdi32 user32 advapi32 ole32 oleaut32 uuid)
 
 add_executable(vcamtest tools/vcamtest.cpp src/vcam_shm.cpp)
 target_include_directories(vcamtest PRIVATE src)
-target_compile_definitions(vcamtest PRIVATE UNICODE _UNICODE)
+target_compile_definitions(vcamtest PRIVATE UNICODE _UNICODE NOMINMAX)
 target_link_libraries(vcamtest PRIVATE strmiids ole32 oleaut32 uuid advapi32)

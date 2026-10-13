@@ -70,13 +70,20 @@ public partial class MainWindow : Window
         if (_app.Server != null)
         {
             _app.Server.SettingsChanged += () => Dispatcher.BeginInvoke(() => _app.SaveSettings());
-            _app.Server.SessionAdded += sess => Dispatcher.BeginInvoke(() => _cards.Add(new SessionViewModel(sess)));
+            _app.Server.SessionAdded += sess => Dispatcher.BeginInvoke(() =>
+            {
+                if (!_cards.Any(c => c.Session == sess)) _cards.Add(new SessionViewModel(sess));
+            });
             _app.Server.SessionRemoved += sess => Dispatcher.BeginInvoke(() =>
             {
                 var vm = _cards.FirstOrDefault(c => c.Session == sess);
                 if (vm != null) _cards.Remove(vm);
             });
             _app.Server.Notice += msg => Dispatcher.BeginInvoke(() => { ErrorText.Text = msg; ErrorText.Visibility = Visibility.Visible; });
+            // Celulares que se conectaron antes de que existiera la ventana (el servidor arranca antes).
+            foreach (var sess in _app.Server.Sessions)
+                if (!_cards.Any(c => c.Session == sess)) _cards.Add(new SessionViewModel(sess));
+            _app.SaveSettings();
         }
 
         _ = CheckCamerasAsync();
@@ -207,7 +214,8 @@ public partial class MainWindow : Window
         UninstallCamsButton.IsEnabled = false;
         bool ok = await Task.Run(VCamInstaller.Uninstall);
         UninstallCamsButton.IsEnabled = true;
-        _camState = "removed";
+        _camState = ok ? "removed"
+            : await Task.Run(() => VCamInstaller.MachineWideHere() ? "ok" : VCamInstaller.IsInstalledHere() ? "ok-user" : "needs-admin");
         UpdateCameraStatus();
         if (!ok)
         {

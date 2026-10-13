@@ -95,7 +95,10 @@ Es una estimación: la cifra real se mide con el método de la sección 7.
 4. Repite con «Cámara NDI - Celular 2», «… 3». En la tarjeta de cada celular del receptor dice qué cámara usa y
    si OBS la está usando.
 5. ¿Otra app (Zoom, Meet, el navegador)? También ven «Cámara NDI - Celular N» como una webcam más.
-6. ¿Mandar los celulares a **otro PC** por la red? Marca "Publicar también por NDI" en el receptor e instala el
+6. ¿Venías usando NDI (fuentes *NDI™ Source* en OBS)? Al actualizar, el receptor **sigue publicando por NDI** para
+   que esas escenas no se queden negras. Cuando ya hayas cambiado las fuentes a «Cámara NDI - Celular N», desmarca
+   "Publicar también por NDI": ahorra CPU (NDI vuelve a comprimir cada imagen).
+7. ¿Mandar los celulares a **otro PC** por la red? Marca "Publicar también por NDI" en el receptor e instala el
    NDI Runtime en los dos PC; en el otro PC usa OBS con el plugin DistroAV (*NDI™ Source*, **Bandwidth: Highest**).
 
 ## 3. Uso de la app (pantalla)

@@ -24,14 +24,18 @@ if (a.Contains("--probe-gpu"))
         using var vp = new D3D11VsrScaler(1280, 720, 1920, 1080, requireNvidia: false);
         var src = new byte[1280 * 720 * 3 / 2];
         Array.Fill(src, (byte)128, 0, 1280 * 720);          // gris medio
-        Array.Fill(src, (byte)128, 1280 * 720, 1280 * 360); // croma neutro
         for (int y = 0; y < 720; y++) for (int x = 0; x < 640; x++) src[y * 1280 + x] = 40; // mitad izquierda oscura
+        // Croma: U=60 a la izquierda y U=200 a la derecha (V neutro), para ver que el plano UV no se corre.
+        for (int y = 0; y < 360; y++)
+            for (int x = 0; x < 1280; x += 2) { src[1280 * 720 + y * 1280 + x] = (byte)(x < 640 ? 60 : 200); src[1280 * 720 + y * 1280 + x + 1] = 128; }
         var dst = new byte[1920 * 1080 * 3 / 2];
         bool ok;
         unsafe { fixed (byte* s = src) fixed (byte* d = dst) ok = vp.Process(s, 1280, 720, d, 1920, 1080); }
-        int left = dst[540 * 1920 + 300], right = dst[540 * 1920 + 1600], uv = dst[1920 * 1080 + 270 * 1920 + 960];
-        bool good = ok && Math.Abs(left - 40) <= 3 && Math.Abs(right - 128) <= 3 && Math.Abs(uv - 128) <= 3;
-        Console.WriteLine($"PROCESADOR DE VIDEO: procesado={ok} izquierda={left} derecha={right} croma={uv} -> {(good ? "OK" : "MAL")}");
+        int left = dst[540 * 1920 + 300], right = dst[540 * 1920 + 1600];
+        int uvRow = 1920 * 1080 + 270 * 1920;
+        int uL = dst[uvRow + 300], uR = dst[uvRow + 1600], vR = dst[uvRow + 1601];
+        bool good = ok && Math.Abs(left - 40) <= 3 && Math.Abs(right - 128) <= 3 && Math.Abs(uL - 60) <= 4 && Math.Abs(uR - 200) <= 4 && Math.Abs(vR - 128) <= 4;
+        Console.WriteLine($"PROCESADOR DE VIDEO: procesado={ok} Y izq={left} der={right} U izq={uL} der={uR} V={vR} -> {(good ? "OK" : "MAL")}");
         return;
     }
     catch (Exception ex)

@@ -50,56 +50,64 @@ public sealed unsafe class D3D11VsrScaler : IGpuScaler
         using var adapter = (requireNvidia ? FindNvidia(out string why) : FindAny(out why))
                             ?? throw new NotSupportedException(why);
         _vsr = adapter.Description1.VendorId == VendorNvidia;
-        D3D11.D3D11CreateDevice(adapter, DriverType.Unknown, DeviceCreationFlags.VideoSupport | DeviceCreationFlags.BgraSupport,
-            new[] { FeatureLevel.Level_11_1, FeatureLevel.Level_11_0 }, out _dev!, out _ctx!).CheckError();
-        _vdev = _dev.QueryInterfaceOrNull<ID3D11VideoDevice>()
-                ?? throw new NotSupportedException("Esta GPU no tiene procesador de video de Direct3D 11");
-        _vctx = _ctx.QueryInterface<ID3D11VideoContext>();
-
-        _enum = _vdev.CreateVideoProcessorEnumerator(new VideoProcessorContentDescription
+        try
         {
-            InputFrameFormat = VideoFrameFormat.Progressive,
-            InputFrameRate = new Rational(30, 1), InputWidth = (uint)sw, InputHeight = (uint)sh,
-            OutputFrameRate = new Rational(30, 1), OutputWidth = (uint)tw, OutputHeight = (uint)th,
-            Usage = VideoUsage.PlaybackNormal,
-        });
-        var nv12 = _enum.CheckVideoProcessorFormat(Format.NV12);
-        if ((nv12 & VideoProcessorFormatSupport.Input) == 0 || (nv12 & VideoProcessorFormatSupport.Output) == 0)
-            throw new NotSupportedException("El procesador de video de esta GPU no acepta NV12");
-        _vp = _vdev.CreateVideoProcessor(_enum, 0);
+            D3D11.D3D11CreateDevice(adapter, DriverType.Unknown, DeviceCreationFlags.VideoSupport | DeviceCreationFlags.BgraSupport,
+                new[] { FeatureLevel.Level_11_1, FeatureLevel.Level_11_0 }, out _dev!, out _ctx!).CheckError();
+            _vdev = _dev.QueryInterfaceOrNull<ID3D11VideoDevice>()
+                    ?? throw new NotSupportedException("Esta GPU no tiene procesador de video de Direct3D 11");
+            _vctx = _ctx.QueryInterface<ID3D11VideoContext>();
 
-        _vctx.VideoProcessorSetStreamAutoProcessingMode(_vp, 0, false);
-        _vctx.VideoProcessorSetStreamFrameFormat(_vp, 0, VideoFrameFormat.Progressive);
-        _vctx.VideoProcessorSetStreamSourceRect(_vp, 0, true, new RawRect(0, 0, sw, sh));
-        _vctx.VideoProcessorSetStreamDestRect(_vp, 0, true, new RawRect(0, 0, tw, th));
-        _vctx.VideoProcessorSetOutputTargetRect(_vp, true, new RawRect(0, 0, tw, th));
-        // El receptor ya entrega BT.709 rango limitado: entra y sale igual (sin corrimientos de color).
-        using (var v1 = _vctx.QueryInterfaceOrNull<ID3D11VideoContext1>())
-        {
-            v1?.VideoProcessorSetStreamColorSpace1(_vp, 0, ColorSpaceType.YcbcrStudioG22LeftP709);
-            v1?.VideoProcessorSetOutputColorSpace1(_vp, ColorSpaceType.YcbcrStudioG22LeftP709);
+            _enum = _vdev.CreateVideoProcessorEnumerator(new VideoProcessorContentDescription
+            {
+                InputFrameFormat = VideoFrameFormat.Progressive,
+                InputFrameRate = new Rational(30, 1), InputWidth = (uint)sw, InputHeight = (uint)sh,
+                OutputFrameRate = new Rational(30, 1), OutputWidth = (uint)tw, OutputHeight = (uint)th,
+                Usage = VideoUsage.PlaybackNormal,
+            });
+            var nv12 = _enum.CheckVideoProcessorFormat(Format.NV12);
+            if ((nv12 & VideoProcessorFormatSupport.Input) == 0 || (nv12 & VideoProcessorFormatSupport.Output) == 0)
+                throw new NotSupportedException("El procesador de video de esta GPU no acepta NV12");
+            _vp = _vdev.CreateVideoProcessor(_enum, 0);
+
+            _vctx.VideoProcessorSetStreamAutoProcessingMode(_vp, 0, false);
+            _vctx.VideoProcessorSetStreamFrameFormat(_vp, 0, VideoFrameFormat.Progressive);
+            _vctx.VideoProcessorSetStreamSourceRect(_vp, 0, true, new RawRect(0, 0, sw, sh));
+            _vctx.VideoProcessorSetStreamDestRect(_vp, 0, true, new RawRect(0, 0, tw, th));
+            _vctx.VideoProcessorSetOutputTargetRect(_vp, true, new RawRect(0, 0, tw, th));
+            // El receptor ya entrega BT.709 rango limitado: entra y sale igual (sin corrimientos de color).
+            using (var v1 = _vctx.QueryInterfaceOrNull<ID3D11VideoContext1>())
+            {
+                v1?.VideoProcessorSetStreamColorSpace1(_vp, 0, ColorSpaceType.YcbcrStudioG22LeftP709);
+                v1?.VideoProcessorSetOutputColorSpace1(_vp, ColorSpaceType.YcbcrStudioG22LeftP709);
+            }
+
+            _inStaging = Texture(sw, sh, ResourceUsage.Staging, BindFlags.None, CpuAccessFlags.Write);
+            _inTex = Texture(sw, sh, ResourceUsage.Default, BindFlags.None, CpuAccessFlags.None);
+            _outTex = Texture(tw, th, ResourceUsage.Default, BindFlags.RenderTarget, CpuAccessFlags.None);
+            _outStaging = Texture(tw, th, ResourceUsage.Staging, BindFlags.None, CpuAccessFlags.Read);
+            _inView = _vdev.CreateVideoProcessorInputView(_inTex, _enum, new VideoProcessorInputViewDescription
+            {
+                FourCC = 0,
+                ViewDimension = VideoProcessorInputViewDimension.Texture2D,
+                Texture2D = new Texture2DVideoProcessorInputView { MipSlice = 0, ArraySlice = 0 },
+            });
+            _outView = _vdev.CreateVideoProcessorOutputView(_outTex, _enum, new VideoProcessorOutputViewDescription
+            {
+                ViewDimension = VideoProcessorOutputViewDimension.Texture2D,
+                Texture2D = new Texture2DVideoProcessorOutputView { MipSlice = 0 },
+            });
+
+            if (_vsr)
+            {
+                var ext = new NvidiaStreamExt { Version = 1, Method = 2, Enable = 1 };
+                _vctx.VideoProcessorSetStreamExtension(_vp, 0, NvidiaPpe, (uint)sizeof(NvidiaStreamExt), (IntPtr)(&ext)).CheckError();
+            }
         }
-
-        _inStaging = Texture(sw, sh, ResourceUsage.Staging, BindFlags.None, CpuAccessFlags.Write);
-        _inTex = Texture(sw, sh, ResourceUsage.Default, BindFlags.None, CpuAccessFlags.None);
-        _outTex = Texture(tw, th, ResourceUsage.Default, BindFlags.RenderTarget, CpuAccessFlags.None);
-        _outStaging = Texture(tw, th, ResourceUsage.Staging, BindFlags.None, CpuAccessFlags.Read);
-        _inView = _vdev.CreateVideoProcessorInputView(_inTex, _enum, new VideoProcessorInputViewDescription
+        catch
         {
-            FourCC = 0,
-            ViewDimension = VideoProcessorInputViewDimension.Texture2D,
-            Texture2D = new Texture2DVideoProcessorInputView { MipSlice = 0, ArraySlice = 0 },
-        });
-        _outView = _vdev.CreateVideoProcessorOutputView(_outTex, _enum, new VideoProcessorOutputViewDescription
-        {
-            ViewDimension = VideoProcessorOutputViewDimension.Texture2D,
-            Texture2D = new Texture2DVideoProcessorOutputView { MipSlice = 0 },
-        });
-
-        if (_vsr)
-        {
-            var ext = new NvidiaStreamExt { Version = 1, Method = 2, Enable = 1 };
-            _vctx.VideoProcessorSetStreamExtension(_vp, 0, NvidiaPpe, (uint)sizeof(NvidiaStreamExt), (IntPtr)(&ext)).CheckError();
+            Dispose(); // si falla a la mitad, no dejar la GPU con objetos sueltos
+            throw;
         }
     }
 
@@ -215,17 +223,17 @@ public sealed unsafe class D3D11VsrScaler : IGpuScaler
 
     public void Dispose()
     {
-        _outView.Dispose();
-        _inView.Dispose();
-        _outStaging.Dispose();
-        _outTex.Dispose();
-        _inTex.Dispose();
-        _inStaging.Dispose();
-        _vp.Dispose();
-        _enum.Dispose();
-        _vctx.Dispose();
-        _vdev.Dispose();
-        _ctx.Dispose();
-        _dev.Dispose();
+        _outView?.Dispose();
+        _inView?.Dispose();
+        _outStaging?.Dispose();
+        _outTex?.Dispose();
+        _inTex?.Dispose();
+        _inStaging?.Dispose();
+        _vp?.Dispose();
+        _enum?.Dispose();
+        _vctx?.Dispose();
+        _vdev?.Dispose();
+        _ctx?.Dispose();
+        _dev?.Dispose();
     }
 }

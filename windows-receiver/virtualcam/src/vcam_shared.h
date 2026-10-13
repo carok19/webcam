@@ -84,7 +84,7 @@ typedef struct VCamHeader {
     volatile uint32_t wantWidth;           /* formato que eligió ese programa: el receptor escala a esto */
     volatile uint32_t wantHeight;
     volatile uint32_t wantFps100;          /* fps x 100 */
-    volatile uint32_t readerPid;
+    volatile uint32_t readerPid;           /* identificador del lector que hizo el pedido (pid y número de instancia) */
 } VCamHeader;
 
 #pragma pack(pop)

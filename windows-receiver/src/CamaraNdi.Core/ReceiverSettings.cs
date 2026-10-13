@@ -69,7 +69,16 @@ public sealed class ReceiverSettings
         try
         {
             if (File.Exists(path))
-                return JsonSerializer.Deserialize<ReceiverSettings>(File.ReadAllText(path), Opts) ?? new();
+            {
+                string text = File.ReadAllText(path);
+                var s = JsonSerializer.Deserialize<ReceiverSettings>(text, Opts) ?? new();
+                // Configuración de una versión anterior (sólo NDI): se sigue publicando por NDI para que las
+                // fuentes NDI que ya están en OBS no se queden negras al actualizar. Se puede desmarcar.
+                using var doc = JsonDocument.Parse(text);
+                if (!doc.RootElement.EnumerateObject().Any(p => p.NameEquals("NdiOutput") || string.Equals(p.Name, "ndiOutput", StringComparison.OrdinalIgnoreCase)))
+                    s.NdiOutput = true;
+                return s;
+            }
         }
         catch (Exception ex) { Log.Error("No se pudo leer la configuración", ex); }
         return new();

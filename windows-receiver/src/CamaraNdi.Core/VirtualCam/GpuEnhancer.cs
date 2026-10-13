@@ -43,6 +43,9 @@ public sealed unsafe class GpuEnhancer : IDisposable
     private bool _off;              // apagada hasta que se cree otro GpuEnhancer (error que no se arregla solo)
     private long _retryAt;          // para estados que pueden cambiar (panel de NVIDIA, la GPU no la aplicó)
     private int _framesSinceCheck;
+    private int _errors;            // errores seguidos de la GPU (pasajeros hasta 3)
+    private int _slowStrikes;       // veces que fue lenta con este mismo tamaño
+    private bool _slowOff;          // lenta dos veces: no se reintenta hasta que cambie el tamaño
     private readonly Queue<double> _times = new();
 
     /// <summary>Texto para la tarjeta del celular (vacío si todavía no se intentó).</summary>
@@ -55,24 +58,33 @@ public sealed unsafe class GpuEnhancer : IDisposable
 
     public GpuEnhancer(Func<int, int, int, int, IGpuScaler> create) => _create = create;
 
+    /// <summary>¿Vale la pena preparar la imagen (por ejemplo pasar I420 a NV12) para <see cref="TryWrite"/>?</summary>
+    public bool WouldTry(int sw, int sh, int tw, int th, long nowMs)
+    {
+        if (_off) return false;
+        if (tw < sw || th < sh)
+        {
+            DropScaler();
+            Fail("Sin efecto: OBS pide menos resolución que la del celular (la IA sólo sirve para agrandar o limpiar)");
+            return false;
+        }
+        if (_slowOff && _size == (sw, sh, tw, th)) return false;
+        return Active || nowMs >= _retryAt;
+    }
+
     /// <summary>
     /// Intenta escribir la imagen mejorada en <paramref name="dst"/>. Devuelve false si hay que usar el escalado
     /// normal (y entonces <paramref name="dst"/> se sobreescribe con él).
     /// </summary>
     public bool TryWrite(byte* nv12, int sw, int sh, byte* dst, int tw, int th, double frameIntervalMs, long nowMs)
     {
-        if (_off) return Fail(null);
-        if (tw < sw || th < sh)
-        {
-            DropScaler();
-            return Fail("Sin efecto: OBS pide menos resolución que la del celular (la IA sólo sirve para agrandar o limpiar)");
-        }
-        if (!Active && nowMs < _retryAt) return false;
+        if (!WouldTry(sw, sh, tw, th, nowMs)) return false;
         try
         {
             if (_scaler == null || _size != (sw, sh, tw, th))
             {
                 DropScaler();
+                if (_size != (sw, sh, tw, th)) { _slowStrikes = 0; _slowOff = false; }
                 _scaler = _create(sw, sh, tw, th);
                 _size = (sw, sh, tw, th);
                 _times.Clear();
@@ -80,7 +92,7 @@ public sealed unsafe class GpuEnhancer : IDisposable
             }
             var sw0 = Stopwatch.GetTimestamp();
             if (!_scaler.Process(nv12, sw, sh, dst, tw, th))
-                return TurnOff("La GPU no pudo procesar la imagen: se usa el escalado normal");
+                return GpuError(nowMs, "La GPU no pudo procesar la imagen");
             double ms = Stopwatch.GetElapsedTime(sw0).TotalMilliseconds;
 
             if (!Active || ++_framesSinceCheck >= 30)
@@ -106,16 +118,36 @@ public sealed unsafe class GpuEnhancer : IDisposable
                 if (median > frameIntervalMs * 0.5)
                 {
                     _times.Clear();
+                    if (++_slowStrikes >= 2)
+                    {
+                        _slowOff = true;
+                        DropScaler();
+                        return Fail($"La GPU tarda demasiado ({median:F0} ms por imagen) con este tamaño: se usa el escalado normal");
+                    }
                     return Later(nowMs, $"La GPU tarda demasiado ({median:F0} ms por imagen): se usa el escalado normal y se vuelve a probar", 30_000);
                 }
             }
+            _errors = 0;
             return true;
+        }
+        catch (Exception ex) when (ex is NotSupportedException or ArgumentException or PlatformNotSupportedException or DllNotFoundException)
+        {
+            Log.Warn("Mejora con IA de la GPU: " + ex.Message);
+            return TurnOff(ex.Message);
         }
         catch (Exception ex)
         {
             Log.Warn("Mejora con IA de la GPU: " + ex.Message);
-            return TurnOff(ex is NotSupportedException ? ex.Message : "Error de la GPU: " + ex.Message);
+            return GpuError(nowMs, "Error de la GPU: " + ex.Message);
         }
+    }
+
+    /// <summary>Error que puede ser pasajero (por ejemplo el controlador se reinició): se reintenta, hasta 3 seguidos.</summary>
+    private bool GpuError(long nowMs, string text)
+    {
+        DropScaler();
+        if (++_errors >= 3) return TurnOff(text + ": se usa el escalado normal");
+        return Later(nowMs, text + ": se usa el escalado normal y se vuelve a probar", 30_000);
     }
 
     private bool Fail(string? text)

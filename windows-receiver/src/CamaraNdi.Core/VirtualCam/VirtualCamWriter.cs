@@ -82,7 +82,9 @@ public sealed unsafe class VirtualCamWriter : IDisposable
     {
         get
         {
-            int w = (int)U32(VCamLayout.HWantWidth), h = (int)U32(VCamLayout.HWantHeight);
+            // Ancho y alto en una sola lectura de 64 bits (la cámara los escribe juntos).
+            ulong v = Volatile.Read(ref *(ulong*)(_p + VCamLayout.HWantWidth));
+            int w = (int)(uint)v, h = (int)(uint)(v >> 32);
             if (w < 16 || h < 16 || w > VCamLayout.MaxWidth || h > VCamLayout.MaxHeight || (w & 1) != 0 || (h & 1) != 0) return (0, 0);
             return (w, h);
         }
@@ -199,7 +201,7 @@ public sealed unsafe class VirtualCamWriter : IDisposable
             return false;
         }
         _enhancer ??= new GpuEnhancer(GpuScalerFactory ?? ((a, b, c, d) => new D3D11VsrScaler(a, b, c, d)));
-        if ((sw & 1) != 0 || (sh & 1) != 0) return false;
+        if ((sw & 1) != 0 || (sh & 1) != 0 || !_enhancer.WouldTry(sw, sh, tw, th, nowMs)) return false;
         byte* input = src;
         if (!nv12)
         {
@@ -229,7 +231,13 @@ public sealed unsafe class VirtualCamWriter : IDisposable
             _running = false;
         }
         _signal.Set();
-        _thread?.Join(2000);
+        if (_thread != null && !_thread.Join(5000))
+        {
+            // El hilo sigue dentro de una escritura (GPU colgada?): no se libera lo que está usando.
+            Log.Warn($"Cámara virtual {Index}: el hilo no terminó a tiempo");
+            _disposed = true;
+            return;
+        }
         _disposed = true;
         Volatile.Write(ref *(long*)(_p + VCamLayout.HWriterHeartbeat), 0L);
         _scaler.Dispose();

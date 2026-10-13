@@ -16,17 +16,39 @@ std::wstring ControlName() { return L"Local\\CamaraNDI_VCam_Control"; }
 std::wstring FrameName(int cameraIndex) { return L"Local\\CamaraNDI_VCam_" + std::to_wstring(cameraIndex); }
 
 bool MakeSharedSecurity(SECURITY_ATTRIBUTES& sa, PSECURITY_DESCRIPTOR& sd) {
-    // Todos pueden leer/escribir (mismo usuario, con o sin administrador) y etiqueta de integridad baja.
-    const wchar_t* sddl = L"D:(A;;GA;;;WD)(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;AC)S:(ML;;NW;;;LW)";
+    // Igual que el receptor (SharedRegion.cs): sólo este usuario (con o sin administrador), el sistema y los
+    // administradores; integridad media.
+    std::wstring user = L"OW";
+    HANDLE token = nullptr;
+    if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) {
+        BYTE buf[256];
+        DWORD len = 0;
+        if (GetTokenInformation(token, TokenUser, buf, sizeof(buf), &len)) {
+            LPWSTR s = nullptr;
+            if (ConvertSidToStringSidW(reinterpret_cast<TOKEN_USER*>(buf)->User.Sid, &s)) {
+                user = s;
+                LocalFree(s);
+            }
+        }
+        CloseHandle(token);
+    }
+    const std::wstring sddl = L"D:(A;;GA;;;" + user + L")(A;;GA;;;SY)(A;;GA;;;BA)S:(ML;;NW;;;ME)";
     sd = nullptr;
-    if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, SDDL_REVISION_1, &sd, nullptr)) return false;
+    if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl.c_str(), SDDL_REVISION_1, &sd, nullptr)) return false;
     sa.nLength = sizeof(sa);
     sa.lpSecurityDescriptor = sd;
     sa.bInheritHandle = FALSE;
     return true;
 }
 
-SharedReader::SharedReader(int cameraIndex) : m_index(cameraIndex) {}
+namespace {
+volatile LONG g_readerCounter = 0;
+}
+
+SharedReader::SharedReader(int cameraIndex) : m_index(cameraIndex) {
+    m_token = (GetCurrentProcessId() << 8) ^ static_cast<uint32_t>(InterlockedIncrement(&g_readerCounter));
+    if (m_token == 0) m_token = 1;
+}
 
 SharedReader::~SharedReader() {
     ClearWant();
@@ -120,17 +142,29 @@ bool SharedReader::ReadLatest(std::vector<uint8_t>& nv12, uint32_t& width, uint3
 
 void SharedReader::PublishWant(uint32_t width, uint32_t height, uint32_t fps100, uint64_t nowMs) {
     if (!m_header || !m_writable) return;
-    m_header->wantWidth = width;
-    m_header->wantHeight = height;
+    // Si otro programa (u otra fuente de OBS) mira la misma cámara y pidió un tamaño MÁS GRANDE, se le
+    // respeta: el receptor manda ese y este lector lo reduce por su cuenta (reducir es barato y no pierde
+    // nitidez; si se alternaran los pedidos, la imagen cambiaría de tamaño en cada cuadro).
+    const uint32_t owner = m_header->readerPid;
+    const int64_t hb = m_header->readerHeartbeatMs;
+    const bool otherFresh = owner != m_token && hb > 0 && static_cast<uint64_t>(hb) <= nowMs + 100 &&
+                            nowMs - static_cast<uint64_t>(hb) < 1500;
+    if (otherFresh) {
+        const uint64_t cur = static_cast<uint64_t>(m_header->wantWidth) * m_header->wantHeight;
+        if (cur > static_cast<uint64_t>(width) * height) return;
+    }
+    // Ancho y alto juntos en una sola escritura de 64 bits: el receptor nunca ve una mezcla de dos pedidos.
+    const uint64_t packed = static_cast<uint64_t>(width) | (static_cast<uint64_t>(height) << 32);
+    InterlockedExchange64(reinterpret_cast<volatile LONG64*>(&m_header->wantWidth), static_cast<LONG64>(packed));
     m_header->wantFps100 = fps100;
-    m_header->readerPid = GetCurrentProcessId();
+    m_header->readerPid = m_token;
     MemoryBarrier();
     m_header->readerHeartbeatMs = static_cast<int64_t>(nowMs);
 }
 
 void SharedReader::ClearWant() {
     if (!m_header || !m_writable) return;
-    if (m_header->readerPid == GetCurrentProcessId()) m_header->readerHeartbeatMs = 0;
+    if (m_header->readerPid == m_token) m_header->readerHeartbeatMs = 0;
 }
 
 }  // namespace vcam
